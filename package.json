@@ -1,0 +1,99 @@
+{
+  "name": "uni-agent",
+  "displayName": "Uni Agent",
+  "description": "A universal agent panel for VS Code.",
+  "version": "0.0.1",
+  "publisher": "uni-agent",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "uniAgent",
+          "title": "Uni Agent",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "uniAgent": [
+        {
+          "id": "uniAgent.chat",
+          "name": "Agent",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "uniAgent.openPanel",
+        "title": "Uni Agent: Open Panel"
+      },
+      {
+        "command": "uniAgent.run",
+        "title": "Uni Agent: Run on Selection"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "uniAgent.run",
+          "when": "editorHasSelection",
+          "group": "1_modification"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Uni Agent",
+      "properties": {
+        "uniAgent.model": {
+          "type": "string",
+          "default": "claude-opus-5",
+          "description": "Model identifier the agent should use."
+        },
+        "uniAgent.apiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "API key for the agent backend. Prefer setting this via the `Uni Agent: Set API Key` flow rather than in settings.json."
+        },
+        "uniAgent.verboseLogging": {
+          "type": "boolean",
+          "default": false,
+          "description": "Write detailed activity to the Uni Agent output channel."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "npm run check-types && node esbuild.js",
+    "watch": "npm-run-all -p watch:*",
+    "watch:esbuild": "node esbuild.js --watch",
+    "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "package": "npm run check-types && node esbuild.js --production",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.90.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "esbuild": "^0.24.0",
+    "eslint": "^9.0.0",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^5.6.0"
+  },
+  "allowScripts": {
+    "esbuild@0.24.2": true
+  }
+}
