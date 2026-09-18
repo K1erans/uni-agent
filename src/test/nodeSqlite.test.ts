@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isNodeSqliteAvailable } from './nodeSqlite';
+import { isNodeSqliteAvailable } from '../nodeSqlite';
 
 describe('isNodeSqliteAvailable', () => {
   it('is true when node:sqlite loads', () => {
