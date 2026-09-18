@@ -1,9 +1,17 @@
 .vscode/**
+.vscode-test/**
 .github/**
+docs/**
 src/**
+webview/**
+out/**
 node_modules/**
 esbuild.js
 tsconfig.json
 eslint.config.mjs
+vitest.config.mts
+.vscode-test.mjs
+AGENTS.md
 **/*.map
 **/*.ts
+**/*.tsx

@@ -3,9 +3,10 @@ import tsparser from '@typescript-eslint/parser';
 
 export default [
   {
-    files: ['src/**/*.ts'],
+    files: ['src/**/*.ts', 'webview/**/*.{ts,tsx}'],
     languageOptions: {
       parser: tsparser,
+      parserOptions: { ecmaFeatures: { jsx: true } },
       ecmaVersion: 2022,
       sourceType: 'module',
     },

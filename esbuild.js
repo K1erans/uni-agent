@@ -19,26 +19,44 @@ const problemMatcherPlugin = {
   },
 };
 
+/** @type {import('esbuild').BuildOptions} */
+const shared = {
+  bundle: true,
+  minify: production,
+  sourcemap: !production,
+  sourcesContent: false,
+  logLevel: 'silent',
+  plugins: [problemMatcherPlugin],
+};
+
 async function main() {
-  const ctx = await esbuild.context({
-    entryPoints: ['src/extension.ts'],
-    bundle: true,
-    format: 'cjs',
-    minify: production,
-    sourcemap: !production,
-    sourcesContent: false,
-    platform: 'node',
-    outfile: 'dist/extension.js',
-    external: ['vscode'],
-    logLevel: 'silent',
-    plugins: [problemMatcherPlugin],
-  });
+  const contexts = await Promise.all([
+    // Extension host (Node).
+    esbuild.context({
+      ...shared,
+      entryPoints: ['src/extension.ts'],
+      format: 'cjs',
+      platform: 'node',
+      outfile: 'dist/extension.js',
+      external: ['vscode'],
+    }),
+    // Thread webview (browser): emits dist/webview/main.js and main.css.
+    esbuild.context({
+      ...shared,
+      entryPoints: ['webview/src/main.tsx'],
+      format: 'iife',
+      platform: 'browser',
+      outdir: 'dist/webview',
+      jsx: 'automatic',
+      define: { 'process.env.NODE_ENV': JSON.stringify(production ? 'production' : 'development') },
+    }),
+  ]);
 
   if (watch) {
-    await ctx.watch();
+    await Promise.all(contexts.map((ctx) => ctx.watch()));
   } else {
-    await ctx.rebuild();
-    await ctx.dispose();
+    await Promise.all(contexts.map((ctx) => ctx.rebuild()));
+    await Promise.all(contexts.map((ctx) => ctx.dispose()));
   }
 }
 
