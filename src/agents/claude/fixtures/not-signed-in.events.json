@@ -1,0 +1,28 @@
+[
+  {
+    "type": "session_started",
+    "agent": "claude",
+    "sessionId": "b1a026eb-2b9b-4771-b397-72283c13d811"
+  },
+  {
+    "type": "turn_started",
+    "turnId": "turn-1",
+    "prompt": [
+      {
+        "type": "text",
+        "text": "Say hello."
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "turnId": "turn-1",
+    "code": "not_signed_in",
+    "message": "Claude Code is not signed in. Run `claude` in a terminal, sign in, then try again.\n\nNot logged in · Please run /login"
+  },
+  {
+    "type": "turn_ended",
+    "turnId": "turn-1",
+    "stopReason": "error"
+  }
+]

@@ -6,8 +6,9 @@ for its lifetime; the model can change within that agent.
 
 ## Status
 
-Skeleton. The **Threads** tree view and the **Uni Agent: New Thread** command are wired
-up and open an empty React chat tab; no agent is connected yet.
+**Uni Agent: New Thread** opens a chat tab that talks to Claude Code: type a prompt and
+the reply streams in. Codex and Cursor, tool calls, persistence and the agent picker are
+still to come.
 
 Uni Agent never stores credentials and discovers models from each agent at runtime, so
 there are no API-key or model settings.
@@ -17,6 +18,9 @@ there are no API-key or model settings.
 - **VS Code 1.101 or later.** Uni Agent uses `node:sqlite`, which VS Code's bundled Node
   only provides unflagged from 1.101 (Electron 35, Node 22.15); 1.100 ships Node 20.
   On an older runtime the extension shows an "update VS Code" error instead of activating.
+- **Claude Code** installed and signed in. Uni Agent runs your own, unmodified `claude`
+  binary (found on `PATH`, or set `uniAgent.claude.executablePath`) and never reads,
+  stores or proxies Claude credentials: sign in by running `claude` in a terminal.
 - The extension runs on the **workspace** side (`extensionKind: workspace`), so in remote
   setups it runs where the agent CLIs are installed.
 
@@ -37,6 +41,10 @@ Press <kbd>F5</kbd> to launch an Extension Development Host with Uni Agent loade
 | Threads tree view (native, activity bar) | `src/threadsTreeDataProvider.ts` |
 | Thread editor tab (webview host, CSP) | `src/threadPanel.ts` |
 | Webview ↔ extension message types | `src/protocol.ts` |
+| Thread: one adapter, its event history, replayed to the webview on load | `src/thread.ts` |
+| Normalised, ACP-shaped event model and adapter interface | `src/agents/events.ts`, `src/agents/adapter.ts` |
+| Claude adapter (Claude Agent SDK over the user's `claude` binary) | `src/agents/claude/` |
+| NDJSON traffic record/replay | `src/agents/traffic.ts`, `src/agents/claude/claudeTraffic.ts` |
 | Thread chat UI (React + `@vscode-elements`) | `webview/src/` |
 | Output-channel logging | `src/logger.ts` |
 | Bundling (extension + webview) | `esbuild.js` |
@@ -48,7 +56,8 @@ Press <kbd>F5</kbd> to launch an Extension Development Host with Uni Agent loade
 
 ### Settings
 
-- `uniAgent.verboseLogging` — verbose output-channel logging.
+- `uniAgent.claude.executablePath` — path to `claude`; empty means search `PATH`.
+- `uniAgent.verboseLogging` — verbose output-channel logging (includes Claude Code's stderr).
 
 ## Scripts
 
@@ -61,6 +70,23 @@ Press <kbd>F5</kbd> to launch an Extension Development Host with Uni Agent loade
     (`webview/**/*.test.tsx`, jsdom)
   - `npm run test:host` — `@vscode/test-cli`: extension-host tests (`src/test/`), run
     against VS Code 1.101.0 (the minimum supported version, see `.vscode-test.mjs`)
+- `npm run test:live` — opt-in, never part of `npm test`: drives your installed agent CLIs
+  and re-records the golden fixtures (it sends real prompts on your account)
+
+## Testing adapters
+
+Adapters are tested by replaying recorded traffic instead of running the real CLIs:
+
+- A fixture (`src/agents/<agent>/fixtures/*.ndjson`) holds raw adapter traffic, one JSON
+  line each: `send` (what the adapter sent), `recv` (what the agent sent back) or `exit`
+  (the process died). `TrafficRecorder` writes them; `replayTraffic` plays one back as a
+  fake agent, failing if the adapter sends something the fixture did not record.
+- Golden tests replay each fixture and compare the normalised events with the matching
+  `*.events.json` file.
+- To re-record after a CLI update: `npm run test:live`, then `npx vitest run -u` to refresh
+  the expected events, and review both diffs. The recorder replaces your home directory
+  with `~` and strips the parts of Claude's messages that describe your own setup (tools,
+  MCP servers, plugins, usage limits).
 
 ## Packaging
 

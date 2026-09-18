@@ -39,6 +39,10 @@ async function main() {
       platform: 'node',
       outfile: 'dist/extension.js',
       external: ['vscode'],
+      // The Agent SDK is ESM and calls createRequire(import.meta.url) at load time, which a CJS
+      // bundle leaves undefined; point it at the bundle itself.
+      define: { 'import.meta.url': 'importMetaUrl' },
+      banner: { js: "const importMetaUrl = require('url').pathToFileURL(__filename).href;" },
     }),
     // Thread webview (browser): emits dist/webview/main.js and main.css.
     esbuild.context({

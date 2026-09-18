@@ -1,14 +1,12 @@
+import * as os from 'node:os';
 import * as vscode from 'vscode';
+import { ClaudeAdapter } from './agents/claude/claudeAdapter';
+import type { UniAgentApi } from './api';
 import { Logger } from './logger';
 import { isNodeSqliteAvailable, MIN_VSCODE_VERSION } from './nodeSqlite';
+import { Thread } from './thread';
 import { openThreadPanel } from './threadPanel';
 import { ThreadsTreeDataProvider } from './threadsTreeDataProvider';
-
-/** Returned from `activate`; lets extension-host tests observe the webview lifecycle. */
-export interface UniAgentApi {
-  /** Fires once a thread webview's React app has mounted. */
-  readonly onDidThreadWebviewReady: vscode.Event<vscode.WebviewPanel>;
-}
 
 export function activate(context: vscode.ExtensionContext): UniAgentApi | undefined {
   const logger = new Logger('Uni Agent');
@@ -34,11 +32,23 @@ export function activate(context: vscode.ExtensionContext): UniAgentApi | undefi
     threadWebviewReady,
     vscode.window.registerTreeDataProvider(ThreadsTreeDataProvider.viewId, new ThreadsTreeDataProvider()),
     vscode.commands.registerCommand('uniAgent.newThread', () => {
-      openThreadPanel(context.extensionUri, (panel) => threadWebviewReady.fire(panel));
+      openThreadPanel(context.extensionUri, new Thread(createClaudeAdapter(logger)), (panel) =>
+        threadWebviewReady.fire(panel)
+      );
     })
   );
 
   return { onDidThreadWebviewReady: threadWebviewReady.event };
+}
+
+/** Every thread talks to Claude until the agent picker lands. */
+function createClaudeAdapter(logger: Logger): ClaudeAdapter {
+  return new ClaudeAdapter({
+    // Multi-root folder choice arrives with persistence; until then use the first folder.
+    cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir(),
+    executablePath: vscode.workspace.getConfiguration('uniAgent').get<string>('claude.executablePath'),
+    log: (line) => logger.debug(line),
+  });
 }
 
 export function deactivate(): void {

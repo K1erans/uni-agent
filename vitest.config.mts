@@ -7,9 +7,19 @@ export default defineConfig({
         test: {
           name: 'unit',
           include: ['src/**/*.test.ts'],
-          // src/test holds extension-host tests, run by @vscode/test-cli.
-          exclude: ['src/test/**'],
+          // src/test holds extension-host tests, run by @vscode/test-cli; live tests drive real CLIs.
+          exclude: ['src/test/**', 'src/**/*.live.test.ts'],
           environment: 'node',
+        },
+      },
+      {
+        // Opt-in only (`npm run test:live`): runs the user's installed agent CLIs and re-records the
+        // golden fixtures, so upstream changes show up as a fixture diff.
+        test: {
+          name: 'live',
+          include: ['src/**/*.live.test.ts'],
+          environment: 'node',
+          testTimeout: 120_000,
         },
       },
       {
@@ -18,7 +28,7 @@ export default defineConfig({
         resolve: { conditions: ['browser'] },
         test: {
           name: 'webview',
-          include: ['webview/**/*.test.tsx'],
+          include: ['webview/**/*.test.{ts,tsx}'],
           environment: 'jsdom',
           setupFiles: ['webview/test/setup.ts'],
           server: {

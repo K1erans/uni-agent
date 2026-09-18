@@ -28,12 +28,52 @@ body {
   overflow-y: auto;
   padding: 16px;
   display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.transcript-empty {
   align-items: center;
   justify-content: center;
 }
 
-.empty-state {
+.empty-state,
+.working {
   color: var(--vscode-descriptionForeground);
+  margin: 0;
+}
+
+.item {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+
+.item-user {
+  align-self: flex-end;
+  max-width: 85%;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+}
+
+.item-thought {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
+.item-thought summary {
+  cursor: pointer;
+  font-style: normal;
+}
+
+.item-error {
+  padding: 8px 12px;
+  border-radius: 6px;
+  color: var(--vscode-errorForeground);
+  background: var(--vscode-inputValidation-errorBackground);
+  border: 1px solid var(--vscode-inputValidation-errorBorder);
 }
 
 .composer {

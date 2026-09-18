@@ -1,12 +1,17 @@
 import * as crypto from 'node:crypto';
 import * as vscode from 'vscode';
-import type { WebviewMessage } from './protocol';
+import type { ExtensionMessage, WebviewMessage } from './protocol';
+import type { Thread } from './thread';
 
 export const THREAD_VIEW_TYPE = 'uniAgent.thread';
 
-/** Opens a thread as an editor-tab webview running the React app from `dist/webview`. */
+/**
+ * Opens a thread as an editor-tab webview running the React app from `dist/webview`. The panel owns
+ * the thread: closing the tab disposes it.
+ */
 export function openThreadPanel(
   extensionUri: vscode.Uri,
+  thread: Thread,
   onReady: (panel: vscode.WebviewPanel) => void
 ): vscode.WebviewPanel {
   const webviewRoot = vscode.Uri.joinPath(extensionUri, 'dist', 'webview');
@@ -14,12 +19,19 @@ export function openThreadPanel(
     enableScripts: true,
     localResourceRoots: [webviewRoot],
   });
+  const post = (message: ExtensionMessage) => void panel.webview.postMessage(message);
   const messages = panel.webview.onDidReceiveMessage((message: WebviewMessage) => {
     if (message.type === 'ready') {
+      thread.attach(post);
       onReady(panel);
+    } else {
+      thread.handle(message);
     }
   });
-  panel.onDidDispose(() => messages.dispose());
+  panel.onDidDispose(() => {
+    messages.dispose();
+    thread.dispose();
+  });
   panel.webview.html = renderHtml(panel.webview, webviewRoot);
   return panel;
 }

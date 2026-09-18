@@ -4,6 +4,14 @@
 
 ### Added
 
+- Claude threads: a new thread sends prompts to the user's own installed `claude` binary through
+  the Claude Agent SDK and streams the reply into the tab. Uni Agent never reads or stores
+  Claude credentials.
+- `uniAgent.claude.executablePath` setting to use a `claude` binary that is not on `PATH`.
+- Missing binary, not signed in and process crashes are shown in the thread.
+- ACP-shaped normalised event model (`src/agents/events.ts`) that every adapter translates into.
+- NDJSON record/replay tooling for adapter traffic, golden tests over recorded Claude fixtures,
+  and an opt-in `npm run test:live` that re-records them against the real CLI.
 - **Threads** native tree view in the Uni Agent activity-bar container.
 - **Uni Agent: New Thread** command, opening an editor-tab webview running a React app
   (its own esbuild bundle) styled with VS Code theme variables and `@vscode-elements`.
