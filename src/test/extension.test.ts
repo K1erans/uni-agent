@@ -1,6 +1,6 @@
 import * as assert from 'node:assert';
 import * as vscode from 'vscode';
-import type { UniAgentApi } from '../extension';
+import type { UniAgentApi } from '../api';
 
 suite('Uni Agent extension', () => {
   test('New Thread opens an editor-tab webview whose React app reports ready', async () => {

@@ -61,6 +61,12 @@
     "configuration": {
       "title": "Uni Agent",
       "properties": {
+        "uniAgent.claude.executablePath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "markdownDescription": "Path to the `claude` executable. Leave empty to find it on `PATH`."
+        },
         "uniAgent.verboseLogging": {
           "type": "boolean",
           "default": false,
@@ -80,11 +86,13 @@
     "lint": "eslint src webview",
     "compile-tests": "tsc -p src/test",
     "test": "npm run test:unit && npm run test:host",
-    "test:unit": "vitest run",
+    "test:unit": "vitest run --project unit --project webview",
+    "test:live": "vitest run --project live",
     "pretest:host": "npm run compile && npm run compile-tests",
     "test:host": "vscode-test"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.277",
     "@vscode-elements/elements": "^2.5.1",
     "@vscode-elements/react-elements": "^2.4.0",
     "react": "^19.3.0",

@@ -9,7 +9,7 @@ const root = createRoot(document.getElementById('root')!);
 flushSync(() => {
   root.render(
     <StrictMode>
-      <App />
+      <App post={(message) => vscode.postMessage(message)} />
     </StrictMode>
   );
 });

@@ -1,0 +1,46 @@
+[
+  {
+    "type": "session_started",
+    "agent": "claude",
+    "sessionId": "8cc654b8-9408-4f14-96b0-a86b4b5713b2"
+  },
+  {
+    "type": "turn_started",
+    "turnId": "turn-1",
+    "prompt": [
+      {
+        "type": "text",
+        "text": "Count from 1 to 5, one number per line. Reply with nothing else."
+      }
+    ]
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_011CfBeHNpaQUorgV64uRFWB:0",
+      "content": {
+        "type": "text",
+        "text": "1"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_011CfBeHNpaQUorgV64uRFWB:0",
+      "content": {
+        "type": "text",
+        "text": "\n2\n3\n4\n5"
+      }
+    }
+  },
+  {
+    "type": "turn_ended",
+    "turnId": "turn-1",
+    "stopReason": "end_turn"
+  }
+]
