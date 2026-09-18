@@ -64,8 +64,8 @@
         "uniAgent.claude.executablePath": {
           "type": "string",
           "default": "",
-          "scope": "machine-overridable",
-          "markdownDescription": "Path to the `claude` executable. Leave empty to find it on `PATH`."
+          "scope": "machine",
+          "markdownDescription": "Path to the `claude` executable. Leave empty to find it on `PATH`. Machine-scoped: workspace settings cannot change which program Uni Agent runs."
         },
         "uniAgent.verboseLogging": {
           "type": "boolean",
@@ -83,7 +83,7 @@
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
     "package": "npm run check-types && node esbuild.js --production",
     "check-types": "tsc --noEmit && tsc --noEmit -p webview",
-    "lint": "eslint src webview",
+    "lint": "eslint src webview && oxlint",
     "compile-tests": "tsc -p src/test",
     "test": "npm run test:unit && npm run test:host",
     "test:unit": "vitest run --project unit --project webview",
@@ -99,6 +99,7 @@
     "react-dom": "^19.3.0"
   },
   "devDependencies": {
+    "@oxlint/plugins": "^1.83.0",
     "@testing-library/react": "^16.3.3",
     "@types/mocha": "^10.0.10",
     "@types/node": "^22.0.0",
@@ -113,6 +114,7 @@
     "eslint": "^9.0.0",
     "jsdom": "^30.1.0",
     "npm-run-all": "^4.1.5",
+    "oxlint": "^1.83.0",
     "typescript": "^5.6.0",
     "vitest": "^5.0.1"
   },
