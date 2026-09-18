@@ -15,3 +15,5 @@ AGENTS.md
 **/*.map
 **/*.ts
 **/*.tsx
+tools/**
+.oxlintrc.json
