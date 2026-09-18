@@ -37,16 +37,17 @@ Press <kbd>F5</kbd> to launch an Extension Development Host with Uni Agent loade
 
 | Piece | Where |
 | --- | --- |
-| Activation, `node:sqlite` check, command registration | `src/extension.ts`, `src/nodeSqlite.ts` |
+| Activation, `node:sqlite` check, command registration, the extension's Effect scope and runtime | `src/extension.ts`, `src/nodeSqlite.ts` |
+| Effect services: agent SDK, executable lookup, IDs; VS Code disposables in a scope; typed settings | `src/agents/claude/claudeAdapter.ts`, `src/agents/findExecutable.ts`, `src/ids.ts`, `src/disposable.ts`, `src/settings.ts` |
 | Threads tree view (native, activity bar) | `src/threadsTreeDataProvider.ts` |
 | Thread editor tab (webview host, CSP) | `src/threadPanel.ts` |
-| Webview ↔ extension message types | `src/protocol.ts` |
-| Thread: one adapter, its event history, replayed to the webview on load | `src/thread.ts` |
-| Normalised, ACP-shaped event model and adapter interface | `src/agents/events.ts`, `src/agents/adapter.ts` |
+| Webview ↔ extension message schemas, decoded on both sides | `src/protocol.ts` |
+| Thread: one scoped adapter, its event history, replayed to the webview on load | `src/thread.ts` |
+| Normalised, ACP-shaped event model (Effect schemas) and adapter interface | `src/agents/events.ts`, `src/agents/adapter.ts` |
 | Claude adapter (Claude Agent SDK over the user's `claude` binary) | `src/agents/claude/` |
 | NDJSON traffic record/replay | `src/agents/traffic.ts`, `src/agents/claude/claudeTraffic.ts` |
 | Thread chat UI (React + `@vscode-elements`) | `webview/src/` |
-| Output-channel logging | `src/logger.ts` |
+| Effect logger that writes to the output channel | `src/logger.ts` |
 | Bundling (extension + webview) | `esbuild.js` |
 
 ### Commands
@@ -64,7 +65,8 @@ Press <kbd>F5</kbd> to launch an Extension Development Host with Uni Agent loade
 - `npm run compile` — type-check and bundle to `dist/` (`extension.js`, `webview/main.{js,css}`)
 - `npm run watch` — rebuild on change (tsc + esbuild in parallel)
 - `npm run package` — production bundle
-- `npm run lint` — ESLint over `src/` and `webview/`
+- `npm run lint` — ESLint over `src/` and `webview/`, then Oxlint with the anti-slop plugin
+  (`.oxlintrc.json`, `tools/oxlint/anti-slop/`)
 - `npm test` — runs both test suites:
   - `npm run test:unit` — Vitest: unit tests (`src/**/*.test.ts`, Node) and webview tests
     (`webview/**/*.test.tsx`, jsdom)
@@ -73,6 +75,12 @@ Press <kbd>F5</kbd> to launch an Extension Development Host with Uni Agent loade
 - `npm run test:live` — opt-in, never part of `npm test`: drives your installed agent CLIs
   and re-records the golden fixtures (it sends real prompts on your account)
 
+## Architecture
+
+The extension host is built on [Effect](https://effect.website): schemas at every boundary,
+scopes that own each thread and its agent process, and services provided as layers. See
+[ADR 0001](docs/adr/0001-effect.md) for the conventions new code follows.
+
 ## Testing adapters
 
 Adapters are tested by replaying recorded traffic instead of running the real CLIs:
@@ -80,7 +88,8 @@ Adapters are tested by replaying recorded traffic instead of running the real CL
 - A fixture (`src/agents/<agent>/fixtures/*.ndjson`) holds raw adapter traffic, one JSON
   line each: `send` (what the adapter sent), `recv` (what the agent sent back) or `exit`
   (the process died). `TrafficRecorder` writes them; `replayTraffic` plays one back as a
-  fake agent, failing if the adapter sends something the fixture did not record.
+  fake agent (an Effect `Stream`), failing if the adapter sends something the fixture did not
+  record. Adapter tests provide the replay as the `ClaudeSdk` service.
 - Golden tests replay each fixture and compare the normalised events with the matching
   `*.events.json` file.
 - To re-record after a CLI update: `npm run test:live`, then `npx vitest run -u` to refresh

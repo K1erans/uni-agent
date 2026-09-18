@@ -1,40 +1,40 @@
 import {
   query as sdkQuery,
   type Options,
+  type Query,
   type SDKAssistantMessage,
   type SDKMessage,
   type SDKPartialAssistantMessage,
   type SDKResultMessage,
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
-import * as crypto from 'node:crypto';
-import { AgentEventEmitter, type AgentAdapter } from '../adapter';
-import { AsyncQueue } from '../asyncQueue';
-import type { AgentErrorCode, ContentBlock, StopReason } from '../events';
-import { findExecutable } from '../findExecutable';
+import { Context, Deferred, Effect, Layer, Option, Queue, Runtime, type Scope, Stream } from 'effect';
+import { Ids } from '../../ids';
+import { TurnInProgress, type AgentAdapter, type EventSink } from '../adapter';
+import type { AgentErrorCode, AgentEvent, ContentBlock, StopReason } from '../events';
+import { Executables } from '../findExecutable';
 
 /** The part of the Agent SDK's `Query` the adapter uses; lets tests substitute a fake agent. */
-export type ClaudeQuery = AsyncIterable<SDKMessage> & { interrupt(): Promise<unknown>; close(): void };
+export type ClaudeQuery = AsyncIterable<SDKMessage> & Pick<Query, 'interrupt' | 'close'>;
 
 export type ClaudeQueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => ClaudeQuery;
 
+/** Starts native Claude sessions; defaults to the Agent SDK's `query`. */
+export class ClaudeSdk extends Context.Tag('uni-agent/ClaudeSdk')<ClaudeSdk, { readonly query: ClaudeQueryFn }>() {
+  static readonly live = Layer.succeed(ClaudeSdk, { query: sdkQuery });
+}
+
 export interface ClaudeAdapterOptions {
   /** The thread's working directory. */
-  cwd: string;
-  /** The `uniAgent.claude.executablePath` setting; empty or unset means search PATH for `claude`. */
-  executablePath?: string;
-  /** Starts the native session; defaults to the Agent SDK's `query`. */
-  query?: ClaudeQueryFn;
-  /** Resolves the `claude` binary; defaults to a PATH search. */
-  findClaude?: (override: string | undefined) => string | undefined;
-  /** Generates session and turn IDs; the session ID must be a UUID. */
-  newId?: () => string;
-  log?: (line: string) => void;
+  readonly cwd: string;
+  /** The `uniAgent.claude.executablePath` setting; none means search PATH for `claude`. */
+  readonly executablePath: Option.Option<string>;
+  readonly onEvent: EventSink;
 }
 
 interface Turn {
   turnId: string;
-  resolve: (stopReason: StopReason) => void;
+  ended: Deferred.Deferred<StopReason>;
   /** API message IDs whose content arrived as stream events, so their complete copies are skipped. */
   streamedMessageIds: Set<string>;
   errorReported: boolean;
@@ -43,7 +43,7 @@ interface Turn {
 
 interface Connection {
   query: ClaudeQuery;
-  input: AsyncQueue<SDKUserMessage>;
+  input: Queue.Queue<SDKUserMessage>;
 }
 
 const STDERR_TAIL_LINES = 20;
@@ -55,16 +55,11 @@ const NOT_SIGNED_IN_ERRORS = new Set<SDKAssistantMessage['error']>(['authenticat
  *
  * The session ID is generated here and handed to Claude, so it is known before the first prompt.
  * One long-lived streaming-input query serves every turn; if the process dies, the next prompt
- * starts a new one that resumes the session.
+ * starts a new one that resumes the session. The query runs in the adapter's scope, so closing
+ * the scope stops it.
  */
-export class ClaudeAdapter extends AgentEventEmitter implements AgentAdapter {
+export class ClaudeAdapter implements AgentAdapter {
   readonly agent = 'claude' as const;
-  readonly sessionId: string;
-
-  private readonly query: ClaudeQueryFn;
-  private readonly findClaude: (override: string | undefined) => string | undefined;
-  private readonly newId: () => string;
-  private readonly log: (line: string) => void;
 
   private connection: Connection | undefined;
   private turn: Turn | undefined;
@@ -75,143 +70,172 @@ export class ClaudeAdapter extends AgentEventEmitter implements AgentAdapter {
   private stderrTail: string[] = [];
   private disposed = false;
 
-  constructor(private readonly options: ClaudeAdapterOptions) {
-    super();
-    this.query = options.query ?? sdkQuery;
-    this.findClaude = options.findClaude ?? ((override) => findExecutable('claude', { override }));
-    this.newId = options.newId ?? crypto.randomUUID;
-    this.log = options.log ?? (() => {});
-    this.sessionId = this.newId();
-  }
+  private constructor(
+    readonly sessionId: string,
+    private readonly options: ClaudeAdapterOptions,
+    private readonly sdk: Context.Tag.Service<ClaudeSdk>,
+    private readonly executables: Context.Tag.Service<Executables>,
+    private readonly ids: Context.Tag.Service<Ids>,
+    private readonly scope: Scope.Scope,
+    private readonly runtime: Runtime.Runtime<never>
+  ) {}
 
-  start(): void {
-    this.emit({ type: 'session_started', agent: this.agent, sessionId: this.sessionId });
-    if (!this.findClaude(this.options.executablePath || undefined)) {
-      this.emit({ type: 'error', code: 'binary_missing', message: this.binaryMissingMessage() });
-    }
-  }
-
-  prompt(prompt: ContentBlock[]): Promise<StopReason> {
-    if (this.turn) {
-      throw new Error('A turn is already running in this session');
-    }
-    const turnId = this.newId();
-    this.emit({ type: 'turn_started', turnId, prompt });
-
-    const executable = this.findClaude(this.options.executablePath || undefined);
-    if (!executable) {
-      this.emit({ type: 'error', turnId, code: 'binary_missing', message: this.binaryMissingMessage() });
-      this.emit({ type: 'turn_ended', turnId, stopReason: 'error' });
-      return Promise.resolve('error');
-    }
-
-    const ended = new Promise<StopReason>((resolve) => {
-      this.turn = { turnId, resolve, streamedMessageIds: new Set(), errorReported: false, cancelRequested: false };
-    });
-    this.connect(executable).input.push({
-      type: 'user',
-      message: { role: 'user', content: prompt.map((block) => ({ type: 'text', text: block.text })) },
-      parent_tool_use_id: null,
-      origin: { kind: 'human' },
-    });
-    return ended;
-  }
-
-  async cancel(): Promise<void> {
-    if (this.turn && this.connection) {
-      this.turn.cancelRequested = true;
-      await this.connection.query.interrupt();
-    }
-  }
-
-  dispose(): void {
-    this.disposed = true;
-    const connection = this.connection;
-    this.connection = undefined;
-    connection?.input.close();
-    connection?.query.close();
-    if (this.turn) {
-      this.endTurn('cancelled');
-    }
-  }
-
-  private connect(executable: string): Connection {
-    if (this.connection) {
-      return this.connection;
-    }
-    const input = new AsyncQueue<SDKUserMessage>();
-    const connection: Connection = {
-      input,
-      query: this.query({
-        prompt: input,
-        options: {
-          cwd: this.options.cwd,
-          pathToClaudeCodeExecutable: executable,
-          ...(this.sessionExists ? { resume: this.sessionId } : { sessionId: this.sessionId }),
-          includePartialMessages: true,
-          systemPrompt: { type: 'preset', preset: 'claude_code' },
-          env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: 'uni-agent' },
-          stderr: (data) => this.recordStderr(data),
-        },
-      }),
-    };
-    this.connection = connection;
-    this.stderrTail = [];
-    this.log(`Started Claude Code (${executable}) for session ${this.sessionId}`);
-    void this.consume(connection);
-    return connection;
-  }
-
-  private async consume(connection: Connection): Promise<void> {
-    let failure: string;
-    try {
-      for await (const message of connection.query) {
-        this.handle(message);
+  static make(options: ClaudeAdapterOptions): Effect.Effect<ClaudeAdapter, never, ClaudeSdk | Executables | Ids | Scope.Scope> {
+    return Effect.gen(function* () {
+      const ids = yield* Ids;
+      const adapter = new ClaudeAdapter(
+        yield* ids.next,
+        options,
+        yield* ClaudeSdk,
+        yield* Executables,
+        ids,
+        yield* Effect.scope,
+        yield* Effect.runtime<never>()
+      );
+      yield* Effect.addFinalizer(() => adapter.dispose());
+      yield* adapter.emit({ type: 'session_started', agent: adapter.agent, sessionId: adapter.sessionId });
+      if (Option.isNone(yield* adapter.findClaude())) {
+        yield* adapter.emit({ type: 'error', code: 'binary_missing', message: adapter.binaryMissingMessage() });
       }
-      failure = 'the process exited';
-    } catch (err) {
-      failure = err instanceof Error ? err.message : String(err);
-    }
-    if (this.disposed || this.connection !== connection) {
-      return;
-    }
-    this.connection = undefined;
-    connection.input.close();
-    const stderr = this.stderrTail.join('\n').trim();
-    this.log(`Claude Code stopped: ${failure}`);
-    this.emit({
-      type: 'error',
-      turnId: this.turn?.turnId,
-      code: 'process_crashed',
-      message: `Claude Code stopped unexpectedly: ${failure}` + (stderr ? `\n\n${stderr}` : ''),
+      return adapter;
     });
-    if (this.turn) {
-      this.endTurn('error');
-    }
   }
 
-  private handle(message: SDKMessage): void {
+  prompt(prompt: ReadonlyArray<ContentBlock>): Effect.Effect<StopReason, TurnInProgress> {
+    return Effect.gen(this, function* () {
+      if (this.turn) {
+        return yield* new TurnInProgress({ sessionId: this.sessionId });
+      }
+      const turnId = yield* this.ids.next;
+      yield* this.emit({ type: 'turn_started', turnId, prompt });
+
+      const executable = yield* this.findClaude();
+      if (Option.isNone(executable)) {
+        yield* this.emit({ type: 'error', turnId, code: 'binary_missing', message: this.binaryMissingMessage() });
+        yield* this.emit({ type: 'turn_ended', turnId, stopReason: 'error' });
+        return 'error';
+      }
+
+      const ended = yield* Deferred.make<StopReason>();
+      this.turn = { turnId, ended, streamedMessageIds: new Set(), errorReported: false, cancelRequested: false };
+      const connection = yield* this.connect(executable.value);
+      const message: SDKUserMessage = {
+        type: 'user',
+        message: { role: 'user', content: prompt.map((block) => ({ type: 'text', text: block.text })) },
+        parent_tool_use_id: null,
+        origin: { kind: 'human' },
+      };
+      yield* Queue.offer(connection.input, message);
+      return yield* Deferred.await(ended);
+    });
+  }
+
+  cancel(): Effect.Effect<void> {
+    return Effect.suspend(() => {
+      const { turn, connection } = this;
+      if (!turn || !connection) {
+        return Effect.void;
+      }
+      turn.cancelRequested = true;
+      return Effect.tryPromise(() => connection.query.interrupt()).pipe(
+        Effect.asVoid,
+        Effect.catchAll((error) => Effect.logWarning('Could not interrupt Claude Code', error))
+      );
+    });
+  }
+
+  private dispose(): Effect.Effect<void> {
+    return Effect.gen(this, function* () {
+      this.disposed = true;
+      const connection = this.connection;
+      this.connection = undefined;
+      if (connection) {
+        yield* Queue.shutdown(connection.input);
+        connection.query.close();
+      }
+      if (this.turn) {
+        yield* this.endTurn(this.turn, 'cancelled');
+      }
+    });
+  }
+
+  private connect(executable: string): Effect.Effect<Connection> {
+    return Effect.gen(this, function* () {
+      if (this.connection) {
+        return this.connection;
+      }
+      const input = yield* Queue.unbounded<SDKUserMessage>();
+      const connection: Connection = {
+        input,
+        query: this.sdk.query({
+          prompt: Stream.toAsyncIterable(Stream.fromQueue(input)),
+          options: {
+            cwd: this.options.cwd,
+            pathToClaudeCodeExecutable: executable,
+            ...(this.sessionExists ? { resume: this.sessionId } : { sessionId: this.sessionId }),
+            includePartialMessages: true,
+            systemPrompt: { type: 'preset', preset: 'claude_code' },
+            env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: 'uni-agent' },
+            stderr: (data) => Runtime.runSync(this.runtime, this.recordStderr(data)),
+          },
+        }),
+      };
+      this.connection = connection;
+      this.stderrTail = [];
+      yield* Effect.logDebug(`Started Claude Code (${executable}) for session ${this.sessionId}`);
+      yield* Effect.forkIn(this.consume(connection), this.scope);
+      return connection;
+    });
+  }
+
+  private consume(connection: Connection): Effect.Effect<void> {
+    return Effect.gen(this, function* () {
+      const failure = yield* Stream.fromAsyncIterable(connection.query, (err) => (err instanceof Error ? err.message : String(err))).pipe(
+        // Handlers update the turn state, so they run only when the consumer reaches each message.
+        Stream.runForEach((message) => Effect.suspend(() => this.handle(message))),
+        Effect.as('the process exited'),
+        Effect.merge
+      );
+      if (this.disposed || this.connection !== connection) {
+        return;
+      }
+      this.connection = undefined;
+      yield* Queue.shutdown(connection.input);
+      const stderr = this.stderrTail.join('\n').trim();
+      yield* Effect.logDebug(`Claude Code stopped: ${failure}`);
+      yield* this.emit({
+        type: 'error',
+        turnId: this.turn?.turnId,
+        code: 'process_crashed',
+        message: `Claude Code stopped unexpectedly: ${failure}` + (stderr ? `\n\n${stderr}` : ''),
+      });
+      if (this.turn) {
+        yield* this.endTurn(this.turn, 'error');
+      }
+    });
+  }
+
+  private handle(message: SDKMessage): Effect.Effect<void> {
     switch (message.type) {
       case 'stream_event':
         this.sessionExists = true;
-        this.handleStreamEvent(message);
-        break;
+        return this.handleStreamEvent(message);
       case 'assistant':
         this.sessionExists = true;
-        this.handleAssistant(message);
-        break;
+        return this.handleAssistant(message);
       case 'result':
         this.sessionExists = true;
-        this.handleResult(message);
-        break;
+        return this.handleResult(message);
+      default:
+        return Effect.void;
     }
   }
 
-  private handleStreamEvent({ event, parent_tool_use_id }: SDKPartialAssistantMessage): void {
+  private handleStreamEvent({ event, parent_tool_use_id }: SDKPartialAssistantMessage): Effect.Effect<void> {
     const turn = this.turn;
     // Subagent traffic belongs to its tool call, which a later ticket renders.
     if (!turn || parent_tool_use_id !== null) {
-      return;
+      return Effect.void;
     }
     if (event.type === 'message_start') {
       this.streamingMessageId = event.message.id;
@@ -219,58 +243,56 @@ export class ClaudeAdapter extends AgentEventEmitter implements AgentAdapter {
     } else if (event.type === 'content_block_delta' && this.streamingMessageId) {
       const messageId = `${this.streamingMessageId}:${event.index}`;
       if (event.delta.type === 'text_delta') {
-        this.emitChunk(turn, 'agent_message_chunk', messageId, event.delta.text);
+        return this.emitChunk(turn, 'agent_message_chunk', messageId, event.delta.text);
       } else if (event.delta.type === 'thinking_delta') {
-        this.emitChunk(turn, 'agent_thought_chunk', messageId, event.delta.thinking);
+        return this.emitChunk(turn, 'agent_thought_chunk', messageId, event.delta.thinking);
       }
     }
+    return Effect.void;
   }
 
-  private handleAssistant({ message, error, parent_tool_use_id }: SDKAssistantMessage): void {
+  private handleAssistant({ message, error, parent_tool_use_id }: SDKAssistantMessage): Effect.Effect<void> {
     const turn = this.turn;
     if (!turn || parent_tool_use_id !== null) {
-      return;
+      return Effect.void;
     }
     const text = message.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('\n');
     if (error) {
-      this.reportError(turn, NOT_SIGNED_IN_ERRORS.has(error) ? 'not_signed_in' : 'agent_error', text);
-      return;
+      return this.reportError(turn, NOT_SIGNED_IN_ERRORS.has(error) ? 'not_signed_in' : 'agent_error', text);
     }
     // Complete copies of streamed messages carry nothing new; ones that never streamed (such as
     // messages Claude Code synthesises itself) are shown whole.
     if (turn.streamedMessageIds.has(message.id)) {
-      return;
+      return Effect.void;
     }
-    message.content.forEach((block, index) => {
-      if (block.type === 'text') {
-        this.emitChunk(turn, 'agent_message_chunk', `${message.id}:${index}`, block.text);
-      }
-    });
+    return Effect.forEach(
+      message.content,
+      (block, index) => (block.type === 'text' ? this.emitChunk(turn, 'agent_message_chunk', `${message.id}:${index}`, block.text) : Effect.void),
+      { discard: true }
+    );
   }
 
-  private handleResult(result: SDKResultMessage): void {
+  private handleResult(result: SDKResultMessage): Effect.Effect<void> {
     const turn = this.turn;
     if (!turn) {
-      return;
+      return Effect.void;
     }
     if (turn.cancelRequested) {
-      this.endTurn('cancelled');
+      return this.endTurn(turn, 'cancelled');
     } else if (result.subtype === 'success' && !result.is_error) {
-      this.endTurn(result.stop_reason === 'max_tokens' || result.stop_reason === 'refusal' ? result.stop_reason : 'end_turn');
+      return this.endTurn(turn, result.stop_reason === 'max_tokens' || result.stop_reason === 'refusal' ? result.stop_reason : 'end_turn');
     } else if (result.subtype === 'error_max_turns') {
-      this.endTurn('max_turn_requests');
-    } else {
-      const [detail, status] =
-        result.subtype === 'success' ? [result.result, result.api_error_status] : [result.errors.join('\n'), undefined];
-      this.reportError(turn, status === 401 ? 'not_signed_in' : 'agent_error', detail);
-      this.endTurn('error');
+      return this.endTurn(turn, 'max_turn_requests');
     }
+    const [detail, status] =
+      result.subtype === 'success' ? [result.result, result.api_error_status] : [result.errors.join('\n'), undefined];
+    return Effect.zipRight(this.reportError(turn, status === 401 ? 'not_signed_in' : 'agent_error', detail), this.endTurn(turn, 'error'));
   }
 
   /** Reports the turn's first error; later ones are usually the same failure echoed by the result. */
-  private reportError(turn: Turn, code: AgentErrorCode, detail: string): void {
+  private reportError(turn: Turn, code: AgentErrorCode, detail: string): Effect.Effect<void> {
     if (turn.errorReported) {
-      return;
+      return Effect.void;
     }
     turn.errorReported = true;
     const message =
@@ -278,7 +300,7 @@ export class ClaudeAdapter extends AgentEventEmitter implements AgentAdapter {
         ? 'Claude Code is not signed in. Run `claude` in a terminal, sign in, then try again.' +
           (detail ? `\n\n${detail}` : '')
         : detail || 'Claude Code reported an error.';
-    this.emit({ type: 'error', turnId: turn.turnId, code, message });
+    return this.emit({ type: 'error', turnId: turn.turnId, code, message });
   }
 
   private emitChunk(
@@ -286,33 +308,44 @@ export class ClaudeAdapter extends AgentEventEmitter implements AgentAdapter {
     sessionUpdate: 'agent_message_chunk' | 'agent_thought_chunk',
     messageId: string,
     text: string
-  ): void {
-    if (text) {
-      this.emit({ type: 'session_update', turnId: turn.turnId, update: { sessionUpdate, messageId, content: { type: 'text', text } } });
-    }
+  ): Effect.Effect<void> {
+    return text
+      ? this.emit({ type: 'session_update', turnId: turn.turnId, update: { sessionUpdate, messageId, content: { type: 'text', text } } })
+      : Effect.void;
   }
 
-  private endTurn(stopReason: StopReason): void {
-    const turn = this.turn!;
-    this.turn = undefined;
-    this.streamingMessageId = undefined;
-    this.emit({ type: 'turn_ended', turnId: turn.turnId, stopReason });
-    turn.resolve(stopReason);
+  private endTurn(turn: Turn, stopReason: StopReason): Effect.Effect<void> {
+    return Effect.suspend(() => {
+      this.turn = undefined;
+      this.streamingMessageId = undefined;
+      return Effect.zipRight(this.emit({ type: 'turn_ended', turnId: turn.turnId, stopReason }), Deferred.succeed(turn.ended, stopReason));
+    });
   }
 
-  private recordStderr(data: string): void {
-    for (const line of data.split('\n')) {
-      if (line.trim()) {
-        this.log(`[claude stderr] ${line}`);
-        this.stderrTail.push(line);
+  private emit(event: AgentEvent): Effect.Effect<void> {
+    return this.options.onEvent(event);
+  }
+
+  private recordStderr(data: string): Effect.Effect<void> {
+    return Effect.gen(this, function* () {
+      for (const line of data.split('\n')) {
+        if (line.trim()) {
+          yield* Effect.logDebug(`[claude stderr] ${line}`);
+          this.stderrTail.push(line);
+        }
       }
-    }
-    this.stderrTail.splice(0, Math.max(0, this.stderrTail.length - STDERR_TAIL_LINES));
+      this.stderrTail.splice(0, Math.max(0, this.stderrTail.length - STDERR_TAIL_LINES));
+    });
+  }
+
+  private findClaude(): Effect.Effect<Option.Option<string>> {
+    return this.executables.find('claude', this.options.executablePath);
   }
 
   private binaryMissingMessage(): string {
-    return this.options.executablePath
-      ? `Claude Code was not found at "${this.options.executablePath}", the path set in uniAgent.claude.executablePath.`
-      : 'Claude Code ("claude") was not found on PATH. Install Claude Code, or set uniAgent.claude.executablePath to its location.';
+    return Option.match(this.options.executablePath, {
+      onSome: (path) => `Claude Code was not found at "${path}", the path set in uniAgent.claude.executablePath.`,
+      onNone: () => 'Claude Code ("claude") was not found on PATH. Install Claude Code, or set uniAgent.claude.executablePath to its location.',
+    });
   }
 }

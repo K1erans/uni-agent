@@ -1,9 +1,12 @@
 import * as path from 'node:path';
+import { Effect, Layer, Option } from 'effect';
 import { describe, expect, it } from 'vitest';
+import { Ids } from '../../ids';
 import type { AgentEvent } from '../events';
+import { Executables } from '../findExecutable';
 import { readTraffic, type TrafficLine } from '../traffic';
-import { ClaudeAdapter } from './claudeAdapter';
-import { replayQuery } from './claudeTraffic';
+import { ClaudeAdapter, ClaudeSdk } from './claudeAdapter';
+import { recordedSessionIds, replayQuery } from './claudeTraffic';
 
 /**
  * Replays fixtures recorded from the real `claude` binary (see claudeAdapter.live.test.ts) and
@@ -12,29 +15,33 @@ import { replayQuery } from './claudeTraffic';
 const FIXTURES = path.join(__dirname, 'fixtures');
 
 async function replay(name: string, prompt: string): Promise<AgentEvent[]> {
-  const traffic = readTraffic(path.join(FIXTURES, `${name}.ndjson`));
+  const traffic = Effect.runSync(readTraffic(path.join(FIXTURES, `${name}.ndjson`)));
   const ids = [recordedSessionId(traffic), 'turn-1'];
-  const adapter = new ClaudeAdapter({
-    cwd: '/workspace',
-    query: replayQuery(traffic),
-    findClaude: () => '/usr/local/bin/claude',
-    newId: () => ids.shift()!,
-  });
   const events: AgentEvent[] = [];
-  adapter.onEvent((event) => events.push(event));
-  adapter.start();
-  await adapter.prompt([{ type: 'text', text: prompt }]);
-  adapter.dispose();
+  const services = Layer.mergeAll(
+    Layer.succeed(ClaudeSdk, { query: replayQuery(traffic) }),
+    Layer.succeed(Executables, { find: () => Effect.succeed(Option.some('/usr/local/bin/claude')) }),
+    Layer.succeed(Ids, { next: Effect.sync(() => ids.shift()!) })
+  );
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter.make({
+        cwd: '/workspace',
+        executablePath: Option.none(),
+        onEvent: (event) => Effect.sync(() => events.push(event)),
+      });
+      yield* adapter.prompt([{ type: 'text', text: prompt }]);
+    }).pipe(Effect.scoped, Effect.provide(services))
+  );
   return events;
 }
 
 function recordedSessionId(traffic: TrafficLine[]): string {
-  for (const line of traffic) {
-    if (line.dir === 'recv' && typeof (line.data as { session_id?: unknown }).session_id === 'string') {
-      return (line.data as { session_id: string }).session_id;
-    }
+  const sessionId = recordedSessionIds(traffic).find((id) => id !== undefined);
+  if (sessionId === undefined) {
+    throw new Error('fixture has no session_id');
   }
-  throw new Error('fixture has no session_id');
+  return sessionId;
 }
 
 describe('Claude adapter golden fixtures', () => {

@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { Context, Effect, Layer, Option } from 'effect';
 
 export interface FindExecutableOptions {
   /** A user-configured path; when set, PATH is not searched at all. */
@@ -9,14 +10,24 @@ export interface FindExecutableOptions {
   isExecutable?: (file: string) => boolean;
 }
 
+/** Resolves agent CLIs; adapters depend on this rather than the file system, so tests can fake it. */
+export class Executables extends Context.Tag('uni-agent/Executables')<
+  Executables,
+  { readonly find: (name: string, override: Option.Option<string>) => Effect.Effect<Option.Option<string>> }
+>() {
+  static readonly live = Layer.succeed(Executables, {
+    find: (name, override) => Effect.sync(() => findExecutable(name, { override: Option.getOrUndefined(override) })),
+  });
+}
+
 /**
  * Resolves an agent CLI by name, like `which`: the configured override if any, else the first
- * executable match on PATH (honouring PATHEXT on Windows). Returns undefined when not found.
+ * executable match on PATH (honouring PATHEXT on Windows).
  */
-export function findExecutable(name: string, options: FindExecutableOptions = {}): string | undefined {
+export function findExecutable(name: string, options: FindExecutableOptions = {}): Option.Option<string> {
   const { override, env = process.env, platform = process.platform, isExecutable = isExecutableFile } = options;
   if (override) {
-    return isExecutable(override) ? override : undefined;
+    return Option.liftPredicate(override, isExecutable);
   }
 
   const pathApi = platform === 'win32' ? path.win32 : path.posix;
@@ -28,11 +39,11 @@ export function findExecutable(name: string, options: FindExecutableOptions = {}
     for (const ext of extensions) {
       const candidate = pathApi.join(dir, name + ext);
       if (isExecutable(candidate)) {
-        return candidate;
+        return Option.some(candidate);
       }
     }
   }
-  return undefined;
+  return Option.none();
 }
 
 function isExecutableFile(file: string): boolean {

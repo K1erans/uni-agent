@@ -17,6 +17,10 @@
   (its own esbuild bundle) styled with VS Code theme variables and `@vscode-elements`.
 - Activation check for `node:sqlite`, with an "update VS Code" error on older runtimes.
 - Vitest (unit + webview) and `@vscode/test-cli` (extension host) test suites behind `npm test`.
+- Effect runtime for the extension host ([ADR 0001](docs/adr/0001-effect.md)): each thread and its
+  agent process live in a scope, so closing a tab or deactivating the extension stops the agent.
+- Webview and extension decode each other's messages with Effect schemas and ignore malformed ones.
+- Oxlint with the anti-slop plugin, run by `npm run lint` after ESLint.
 
 ### Changed
 
