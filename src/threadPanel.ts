@@ -1,39 +1,56 @@
 import * as crypto from 'node:crypto';
+import { Effect, ExecutionStrategy, Exit, Option, Runtime, Schema, Scope } from 'effect';
 import * as vscode from 'vscode';
-import type { ExtensionMessage, WebviewMessage } from './protocol';
-import type { Thread } from './thread';
+import type { MakeAdapter } from './agents/adapter';
+import { disposable } from './disposable';
+import { WebviewMessage, type ExtensionMessage } from './protocol';
+import { makeThread } from './thread';
 
 export const THREAD_VIEW_TYPE = 'uniAgent.thread';
 
+const decodeWebviewMessage = Schema.decodeUnknownOption(WebviewMessage);
+
 /**
- * Opens a thread as an editor-tab webview running the React app from `dist/webview`. The panel owns
- * the thread: closing the tab disposes it.
+ * Opens a new thread in an editor-tab webview running the React app from `dist/webview`. The
+ * thread gets its own scope inside the caller's: closing the tab closes it, and so does closing
+ * the caller's scope (the extension deactivating), which also closes the tab.
  */
-export function openThreadPanel(
+export function openThreadPanel<R>(
   extensionUri: vscode.Uri,
-  thread: Thread,
+  makeAdapter: MakeAdapter<R>,
   onReady: (panel: vscode.WebviewPanel) => void
-): vscode.WebviewPanel {
-  const webviewRoot = vscode.Uri.joinPath(extensionUri, 'dist', 'webview');
-  const panel = vscode.window.createWebviewPanel(THREAD_VIEW_TYPE, 'New Thread', vscode.ViewColumn.Active, {
-    enableScripts: true,
-    localResourceRoots: [webviewRoot],
+): Effect.Effect<vscode.WebviewPanel, never, R | Scope.Scope> {
+  return Effect.gen(function* () {
+    const scope = yield* Effect.flatMap(Effect.scope, (parent) => Scope.fork(parent, ExecutionStrategy.sequential));
+    const run = Runtime.runFork(yield* Effect.runtime<never>());
+    const thread = yield* makeThread(makeAdapter).pipe(Scope.extend(scope));
+
+    const webviewRoot = vscode.Uri.joinPath(extensionUri, 'dist', 'webview');
+    const panel = yield* disposable(() =>
+      vscode.window.createWebviewPanel(THREAD_VIEW_TYPE, 'New Thread', vscode.ViewColumn.Active, {
+        enableScripts: true,
+        localResourceRoots: [webviewRoot],
+      })
+    ).pipe(Scope.extend(scope));
+    const post = (message: ExtensionMessage) => Effect.sync(() => void panel.webview.postMessage(message));
+
+    yield* disposable(() =>
+      panel.webview.onDidReceiveMessage((raw) =>
+        run(
+          Option.match(decodeWebviewMessage(raw), {
+            onNone: () => Effect.logWarning('Ignored a malformed message from the thread webview'),
+            onSome: (message) =>
+              message.type === 'ready'
+                ? Effect.andThen(thread.attach(post), () => onReady(panel))
+                : thread.handle(message),
+          })
+        )
+      )
+    ).pipe(Scope.extend(scope));
+    panel.onDidDispose(() => run(Scope.close(scope, Exit.void)));
+    panel.webview.html = renderHtml(panel.webview, webviewRoot);
+    return panel;
   });
-  const post = (message: ExtensionMessage) => void panel.webview.postMessage(message);
-  const messages = panel.webview.onDidReceiveMessage((message: WebviewMessage) => {
-    if (message.type === 'ready') {
-      thread.attach(post);
-      onReady(panel);
-    } else {
-      thread.handle(message);
-    }
-  });
-  panel.onDidDispose(() => {
-    messages.dispose();
-    thread.dispose();
-  });
-  panel.webview.html = renderHtml(panel.webview, webviewRoot);
-  return panel;
 }
 
 function renderHtml(webview: vscode.Webview, webviewRoot: vscode.Uri): string {

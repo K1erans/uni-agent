@@ -1,3 +1,5 @@
+import { Effect } from 'effect';
+
 /**
  * Uni Agent relies on `node:sqlite`, which the Node runtime bundled with VS Code only
  * provides unflagged from VS Code 1.101 (Electron 35, Node 22.15). Keep in sync with
@@ -5,11 +7,10 @@
  */
 export const MIN_VSCODE_VERSION = '1.101';
 
-export function isNodeSqliteAvailable(load: () => unknown = () => require('node:sqlite')): boolean {
-  try {
-    load();
-    return true;
-  } catch {
-    return false;
-  }
+/** Whether `node:sqlite` loads; never fails. */
+export function nodeSqliteAvailable(load: () => void = () => require('node:sqlite')): Effect.Effect<boolean> {
+  return Effect.try(load).pipe(
+    Effect.as(true),
+    Effect.orElseSucceed(() => false)
+  );
 }

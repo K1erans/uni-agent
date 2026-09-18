@@ -63,6 +63,16 @@ describe('App', () => {
     expect(sendButton().disabled).toBe(false);
   });
 
+  it('ignores messages that do not match the protocol', () => {
+    render(<App post={() => {}} />);
+
+    act(() => {
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'event', event: { type: 'nonsense' } } }));
+    });
+
+    expect(screen.getByText('No messages yet.')).toBeTruthy();
+  });
+
   it('shows agent errors in the thread', () => {
     render(<App post={() => {}} />);
 
@@ -79,14 +89,14 @@ describe('Transcript', () => {
   it('re-renders only the item that is streaming', () => {
     let finishedRenders = 0;
     // A getter counts how often the finished item's component reads it, i.e. renders.
-    const finished = {
+    const finished: TranscriptItem = {
       kind: 'agent_message',
       id: 'm:0',
       get text() {
         finishedRenders++;
         return 'Finished message';
       },
-    } as TranscriptItem;
+    };
     const streaming = (text: string): TranscriptItem => ({ kind: 'agent_message', id: 'm:1', text });
 
     const { rerender } = render(<Transcript items={[finished, streaming('Str')]} running />);

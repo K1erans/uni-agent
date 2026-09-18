@@ -1,8 +1,12 @@
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
+import { Effect, Either, Exit, Layer, Option, Scope } from 'effect';
 import { describe, expect, it } from 'vitest';
+import { Ids } from '../../ids';
+import { TurnInProgress } from '../adapter';
 import type { AgentEvent } from '../events';
+import { Executables } from '../findExecutable';
 import type { TrafficLine } from '../traffic';
-import { ClaudeAdapter, type ClaudeAdapterOptions, type ClaudeQueryFn } from './claudeAdapter';
+import { ClaudeAdapter, ClaudeSdk } from './claudeAdapter';
 import { replayQuery } from './claudeTraffic';
 
 const SESSION_ID = '00000000-0000-4000-8000-000000000001';
@@ -31,34 +35,49 @@ function textStream(messageId: string, ...deltas: string[]): TrafficLine[] {
   ];
 }
 
-function assistant(id: string, text: string, error?: string) {
-  return { type: 'assistant', parent_tool_use_id: null, error, message: { id, content: [{ type: 'text', text }] } };
+function assistant(id: string, text: string) {
+  return { type: 'assistant', parent_tool_use_id: null, message: { id, content: [{ type: 'text', text }] } };
 }
 
-function result(fields: Record<string, unknown> = {}) {
+function result(fields: { is_error?: boolean; result?: string } = {}) {
   return { type: 'result', subtype: 'success', is_error: false, result: '', stop_reason: 'end_turn', ...fields };
 }
 
-/** Builds an adapter over a fake agent, capturing the events it emits and the options it starts Claude with. */
-function setup(traffic: TrafficLine[][], overrides: Partial<ClaudeAdapterOptions> = {}) {
+interface SetupOptions {
+  executablePath?: Option.Option<string>;
+  /** Resolves `claude` given the configured override; defaults to finding it. */
+  findClaude?: (override: Option.Option<string>) => Option.Option<string>;
+}
+
+/**
+ * Builds an adapter over a fake agent, in a scope the test can close, capturing the events it emits
+ * and the options it starts Claude with.
+ */
+function setup(traffic: TrafficLine[][], { executablePath = Option.none(), findClaude = () => Option.some('/usr/local/bin/claude') }: SetupOptions = {}) {
   const events: AgentEvent[] = [];
   const started: Options[] = [];
   const sessions = [...traffic];
-  const query: ClaudeQueryFn = (params) => {
-    started.push(params.options);
-    return replayQuery(sessions.shift() ?? [])(params);
-  };
-  let turn = 0;
-  const adapter = new ClaudeAdapter({
-    cwd: '/workspace',
-    query,
-    findClaude: () => '/usr/local/bin/claude',
-    newId: () => (turn++ === 0 ? SESSION_ID : `turn-${turn - 1}`),
-    ...overrides,
-  });
-  adapter.onEvent((event) => events.push(event));
-  const prompt = (text: string) => adapter.prompt([{ type: 'text', text }]);
-  return { adapter, events, started, prompt };
+  let id = 0;
+  const services = Layer.mergeAll(
+    Layer.succeed(ClaudeSdk, {
+      query: (params) => {
+        started.push(params.options);
+        return replayQuery(sessions.shift() ?? [])(params);
+      },
+    }),
+    Layer.succeed(Executables, { find: (_name, override) => Effect.sync(() => findClaude(override)) }),
+    Layer.succeed(Ids, { next: Effect.sync(() => (id++ === 0 ? SESSION_ID : `turn-${id - 1}`)) })
+  );
+  const scope = Effect.runSync(Scope.make());
+  const adapter = Effect.runSync(
+    ClaudeAdapter.make({ cwd: '/workspace', executablePath, onEvent: (event) => Effect.sync(() => events.push(event)) }).pipe(
+      Scope.extend(scope),
+      Effect.provide(services)
+    )
+  );
+  const prompt = (text: string) => Effect.runPromise(adapter.prompt([{ type: 'text', text }]));
+  const dispose = () => Effect.runPromise(Scope.close(scope, Exit.void));
+  return { adapter, events, started, prompt, dispose };
 }
 
 const chunks = (events: AgentEvent[]) =>
@@ -73,7 +92,6 @@ describe('ClaudeAdapter', () => {
     const { adapter, events, started, prompt } = setup([[{ dir: 'send', data: userMessage('hi') }, { dir: 'recv', data: result() }]]);
 
     expect(adapter.sessionId).toBe(SESSION_ID);
-    adapter.start();
     expect(events).toEqual([{ type: 'session_started', agent: 'claude', sessionId: SESSION_ID }]);
 
     await prompt('hi');
@@ -113,9 +131,8 @@ describe('ClaudeAdapter', () => {
   });
 
   it('reports a missing binary in the thread instead of starting Claude', async () => {
-    const { adapter, events, started, prompt } = setup([], { findClaude: () => undefined });
+    const { events, started, prompt } = setup([], { findClaude: () => Option.none() });
 
-    adapter.start();
     expect(await prompt('hi')).toBe('error');
     expect(started).toEqual([]);
     expect(events.filter((event) => event.type === 'error')).toEqual([
@@ -126,14 +143,13 @@ describe('ClaudeAdapter', () => {
   });
 
   it('names the configured path when the executablePath setting is wrong', () => {
-    let override: string | undefined;
-    const { adapter, events } = setup([], {
-      executablePath: '/opt/claude',
-      findClaude: (path) => ((override = path), undefined),
+    let override: Option.Option<string> = Option.none();
+    const { events } = setup([], {
+      executablePath: Option.some('/opt/claude'),
+      findClaude: (path) => ((override = path), Option.none()),
     });
 
-    adapter.start();
-    expect(override).toBe('/opt/claude');
+    expect(override).toEqual(Option.some('/opt/claude'));
     expect(events[1]).toMatchObject({ code: 'binary_missing', message: expect.stringContaining('"/opt/claude"') });
   });
 
@@ -141,7 +157,7 @@ describe('ClaudeAdapter', () => {
     const { events, prompt } = setup([
       [
         { dir: 'send', data: userMessage('hi') },
-        { dir: 'recv', data: assistant('msg_1', 'API Error: 529 Overloaded', 'overloaded') },
+        { dir: 'recv', data: { ...assistant('msg_1', 'API Error: 529 Overloaded'), error: 'overloaded' } },
         { dir: 'recv', data: result({ is_error: true, result: 'API Error: 529 Overloaded' }) },
       ],
     ]);
@@ -186,11 +202,19 @@ describe('ClaudeAdapter', () => {
     expect(started[1].sessionId).toBeUndefined();
   });
 
+  it('refuses a second prompt while a turn is running', async () => {
+    const { adapter, prompt } = setup([[{ dir: 'send', data: userMessage('hi') }]]);
+
+    void prompt('hi');
+    const second = await Effect.runPromise(Effect.either(adapter.prompt([{ type: 'text', text: 'again' }])));
+    expect(second).toEqual(Either.left(new TurnInProgress({ sessionId: SESSION_ID })));
+  });
+
   it('ends a running turn as cancelled when disposed', async () => {
-    const { adapter, events, prompt } = setup([[{ dir: 'send', data: userMessage('hi') }]]);
+    const { events, prompt, dispose } = setup([[{ dir: 'send', data: userMessage('hi') }]]);
 
     const turn = prompt('hi');
-    adapter.dispose();
+    await dispose();
     expect(await turn).toBe('cancelled');
     expect(events.filter((event) => event.type === 'error')).toEqual([]);
   });

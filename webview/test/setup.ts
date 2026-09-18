@@ -2,7 +2,7 @@ import { cleanup } from '@testing-library/react';
 import { afterEach } from 'vitest';
 
 // jsdom's ElementInternals lacks the form-associated API that @vscode-elements form controls call.
-const internals = ElementInternals.prototype as Partial<ElementInternals>;
+const internals: Partial<ElementInternals> = ElementInternals.prototype;
 internals.setFormValue ??= () => {};
 internals.setValidity ??= () => {};
 

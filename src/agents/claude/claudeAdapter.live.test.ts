@@ -1,12 +1,15 @@
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { query, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { Effect, Layer, Option } from 'effect';
 import { describe, expect, it } from 'vitest';
+import { Ids } from '../../ids';
 import type { AgentEvent } from '../events';
+import { Executables } from '../findExecutable';
 import { readTraffic, TrafficRecorder } from '../traffic';
-import { ClaudeAdapter, type ClaudeQueryFn } from './claudeAdapter';
-import { recordingQuery } from './claudeTraffic';
+import { ClaudeAdapter, ClaudeSdk, type ClaudeQueryFn } from './claudeAdapter';
+import { recordedSessionIds, recordingQuery } from './claudeTraffic';
 
 /**
  * Drives the installed `claude` binary and re-records the golden fixtures that
@@ -18,16 +21,21 @@ const FIXTURES = path.join(__dirname, 'fixtures');
 async function record(name: string, prompt: string, queryFn: ClaudeQueryFn = query): Promise<AgentEvent[]> {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'uni-agent-live-'));
   const fixture = path.join(FIXTURES, `${name}.ndjson`);
-  const adapter = new ClaudeAdapter({ cwd, query: recordingQuery(queryFn, new TrafficRecorder(fixture)) });
   const events: AgentEvent[] = [];
-  adapter.onEvent((event) => events.push(event));
-  adapter.start();
-  await adapter.prompt([{ type: 'text', text: prompt }]);
-  adapter.dispose();
+  const sessionId = await Effect.runPromise(
+    Effect.gen(function* () {
+      const recorder = yield* TrafficRecorder.make<SDKUserMessage, Partial<SDKMessage>>(fixture);
+      const adapter = yield* ClaudeAdapter.make({ cwd, executablePath: Option.none(), onEvent: (event) => Effect.sync(() => events.push(event)) }).pipe(
+        Effect.provide(Layer.succeed(ClaudeSdk, { query: recordingQuery(queryFn, recorder) }))
+      );
+      yield* adapter.prompt([{ type: 'text', text: prompt }]);
+      return adapter.sessionId;
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(Executables.live, Ids.live)))
+  );
 
   // Claude must adopt the session ID the adapter generated rather than assign its own.
-  const sessionIds = new Set(readTraffic(fixture).flatMap((line) => (line.dir === 'recv' ? [(line.data as { session_id?: string }).session_id] : [])));
-  expect([...sessionIds]).toEqual([adapter.sessionId]);
+  const sessionIds = new Set(recordedSessionIds(Effect.runSync(readTraffic(fixture))));
+  expect([...sessionIds]).toEqual([sessionId]);
   return events;
 }
 
