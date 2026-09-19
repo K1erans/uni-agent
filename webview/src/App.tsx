@@ -44,7 +44,10 @@ export function App({ post, drafts }: AppProps) {
     return () => window.removeEventListener('message', onMessage);
   }, []);
 
-  useEffect(() => drafts?.save(draftsByThread), [drafts, draftsByThread]);
+  // Braces matter: whatever `save` returns must not reach React, which would call it as a cleanup.
+  useEffect(() => {
+    drafts?.save(draftsByThread);
+  }, [drafts, draftsByThread]);
 
   /** Posts a prompt to the shown thread, unless a turn is running or no thread is shown yet. */
   const sendPrompt = useCallback(

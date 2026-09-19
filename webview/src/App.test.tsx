@@ -186,7 +186,8 @@ describe('App', () => {
 
   it('keeps each thread’s unsent draft, including while the sidebar is hidden', () => {
     let saved: Drafts = new Map([['thread-1', 'Half-written']]);
-    const drafts = { load: () => saved, save: (next: Drafts) => void (saved = next) };
+    // `save` returns a value, as VS Code's `setState` does; the app must not hand it to React.
+    const drafts = { load: () => saved, save: (next: Drafts) => (saved = next) };
     const post = vi.fn();
     const { unmount } = render(<App post={post} drafts={drafts} />);
     open();
