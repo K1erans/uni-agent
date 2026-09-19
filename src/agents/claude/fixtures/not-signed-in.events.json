@@ -15,6 +15,11 @@
     ]
   },
   {
+    "type": "session_configured",
+    "model": "claude-opus-5[1m]",
+    "permissionMode": "default"
+  },
+  {
     "type": "error",
     "turnId": "turn-1",
     "code": "not_signed_in",

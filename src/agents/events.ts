@@ -96,6 +96,9 @@ export type AgentErrorCode = typeof AgentErrorCode.Type;
 export const AgentEvent = Schema.Union(
   // The native session exists (or is reserved) and can be resumed by `sessionId`.
   Schema.Struct({ type: Schema.Literal('session_started'), agent: AgentKind, sessionId: Schema.String }),
+  // The model and permission mode the agent runs the session with, as it reports them. Sent again
+  // whenever the agent (re)starts, so the latest one is current. Modes are the agent's own names.
+  Schema.Struct({ type: Schema.Literal('session_configured'), model: Schema.String, permissionMode: Schema.String }),
   Schema.Struct({ type: Schema.Literal('turn_started'), turnId: Schema.String, prompt: Schema.Array(ContentBlock) }),
   Schema.Struct({ type: Schema.Literal('session_update'), turnId: Schema.String, update: SessionUpdate }),
   Schema.Struct({

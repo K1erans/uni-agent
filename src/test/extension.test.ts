@@ -3,26 +3,23 @@ import * as vscode from 'vscode';
 import type { UniAgentApi } from '../api';
 
 suite('Uni Agent extension', () => {
-  test('New Thread opens an editor-tab webview whose React app reports ready', async () => {
+  test('New Thread reveals the sidebar webview, whose React app reports ready', async () => {
     const extension = vscode.extensions.getExtension<UniAgentApi | undefined>('uni-agent.uni-agent');
     assert.ok(extension, 'extension should be installed');
     const api = await extension.activate();
     assert.ok(api, 'extension should activate fully (node:sqlite available)');
 
-    const ready = new Promise<vscode.WebviewPanel>((resolve) => {
-      const subscription = api.onDidThreadWebviewReady((panel) => {
+    const ready = new Promise<vscode.WebviewView>((resolve) => {
+      const subscription = api.onDidWebviewReady((view) => {
         subscription.dispose();
-        resolve(panel);
+        resolve(view);
       });
     });
     await vscode.commands.executeCommand('uniAgent.newThread');
-    const panel = await withTimeout(ready, 10_000, 'thread webview never reported ready');
+    const view = await withTimeout(ready, 10_000, 'sidebar webview never reported ready');
 
-    const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
-    assert.ok(tab?.input instanceof vscode.TabInputWebview, 'active editor tab should be a webview');
-    assert.ok(tab.input.viewType.endsWith('uniAgent.thread'), `unexpected viewType ${tab.input.viewType}`);
-
-    panel.dispose();
+    assert.strictEqual(view.viewType, 'uniAgent.sidebar');
+    assert.ok(view.visible, 'sidebar view should be visible');
   });
 });
 
