@@ -8,7 +8,7 @@ import { AgentFailure, CLIENT_INFO, JsonRpcAdapter, type OpenedSession, type Tur
 import { Stdio } from '../stdio';
 import { WireMessage } from '../traffic';
 import { Turn, type ChunkKind } from '../turn';
-import { CODEX_APPROVAL_OPTIONS, CODEX_CANCELLED, ThreadItem, toolCallOf, type ItemLifecycle } from './codexItems';
+import { AvailableDecisions, CODEX_CANCELLED, codexApproval, ThreadItem, toolCallOf, type CodexApproval, type ItemLifecycle } from './codexItems';
 
 // The parts of Codex's app-server protocol the adapter reads (`codex app-server generate-ts`).
 
@@ -60,6 +60,7 @@ const FILE_CHANGE_APPROVAL = 'item/fileChange/requestApproval';
 
 const CommandApproval = Schema.Struct({
   itemId: Schema.String,
+  availableDecisions: AvailableDecisions,
   command: Schema.optional(Schema.NullOr(Schema.String)),
   cwd: Schema.optional(Schema.NullOr(Schema.String)),
   reason: Schema.optional(Schema.NullOr(Schema.String)),
@@ -69,6 +70,7 @@ const CommandApproval = Schema.Struct({
 
 const FileChangeApproval = Schema.Struct({
   itemId: Schema.String,
+  availableDecisions: AvailableDecisions,
   reason: Schema.optional(Schema.NullOr(Schema.String)),
   grantRoot: Schema.optional(Schema.NullOr(Schema.String)),
 });
@@ -215,25 +217,31 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
       case COMMAND_APPROVAL:
         return Effect.map(decodeMessage(CommandApproval, params, `${method} request`), (request) =>
           Option.some(
-            this.askApproval({
-              toolCallId: request.itemId,
-              title: commandApprovalTitle(request),
-              kind: request.networkApprovalContext ? 'fetch' : 'execute',
-              status: 'pending',
-              rawInput: { command: request.command ?? null, cwd: request.cwd ?? null, reason: request.reason ?? null },
-            })
+            this.askApproval(
+              {
+                toolCallId: request.itemId,
+                title: commandApprovalTitle(request),
+                kind: request.networkApprovalContext ? 'fetch' : 'execute',
+                status: 'pending',
+                rawInput: { command: request.command ?? null, cwd: request.cwd ?? null, reason: request.reason ?? null },
+              },
+              codexApproval(request.availableDecisions)
+            )
           )
         );
       case FILE_CHANGE_APPROVAL:
         return Effect.map(decodeMessage(FileChangeApproval, params, `${method} request`), (request) =>
           Option.some(
-            this.askApproval({
-              toolCallId: request.itemId,
-              title: request.grantRoot ? `Write files under ${request.grantRoot}` : 'Apply file changes',
-              kind: 'edit',
-              status: 'pending',
-              rawInput: { reason: request.reason ?? null, grantRoot: request.grantRoot ?? null },
-            })
+            this.askApproval(
+              {
+                toolCallId: request.itemId,
+                title: request.grantRoot ? `Write files under ${request.grantRoot}` : 'Apply file changes',
+                kind: 'edit',
+                status: 'pending',
+                rawInput: { reason: request.reason ?? null, grantRoot: request.grantRoot ?? null },
+              },
+              codexApproval(request.availableDecisions)
+            )
           )
         );
       default:
@@ -241,8 +249,8 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
     }
   }
 
-  /** Asks the user about `toolCall` and answers Codex with the decision they chose. */
-  private askApproval(toolCall: ToolCall): Effect.Effect<WireMessage> {
+  /** Asks the user about `toolCall` and answers Codex with the decision behind the option they chose. */
+  private askApproval(toolCall: ToolCall, approval: CodexApproval): Effect.Effect<WireMessage> {
     return Effect.suspend(() => {
       const turn = this.turn;
       if (!turn) {
@@ -251,8 +259,8 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
       return Effect.zipRight(
         // The card and the item Codex started are the same tool call, so the ask updates it.
         turn.toolCall(toolCall),
-        Effect.map(this.approvals.ask(turn.id, toolCall, CODEX_APPROVAL_OPTIONS), (outcome) => ({
-          decision: outcome.outcome === 'selected' ? outcome.optionId : CODEX_CANCELLED,
+        Effect.map(this.approvals.ask(turn.id, toolCall, approval.options), (outcome) => ({
+          decision: (outcome.outcome === 'selected' ? approval.decisions.get(outcome.optionId) : undefined) ?? CODEX_CANCELLED,
         }))
       );
     });

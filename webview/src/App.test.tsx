@@ -269,6 +269,32 @@ describe('App approvals', () => {
     expect(post).toHaveBeenCalledWith({ type: 'permission_response', threadId: 'thread-1', requestId: 'permission-1', optionId: 'allow' });
   });
 
+  it('shows what a tool returned, whether as content or as the agent’s own value', () => {
+    render(<App post={() => {}} />);
+    open();
+    event(turnStarted('Search'));
+    event({
+      type: 'session_update',
+      turnId: 't1',
+      update: { sessionUpdate: 'tool_call', toolCallId: 'call_1', title: 'grep TODO', kind: 'search', status: 'in_progress', rawInput: { pattern: 'TODO' } },
+    });
+    event({
+      type: 'session_update',
+      turnId: 't1',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call_1',
+        status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text: 'notes.md:3' } }],
+        rawOutput: { totalMatches: 1 },
+      },
+    });
+
+    expect(screen.getByText('notes.md:3')).toBeTruthy();
+    expect(screen.getByText(/"totalMatches": 1/)).toBeTruthy();
+    expect(screen.getByText('Done')).toBeTruthy();
+  });
+
   it('replaces the ask with the answer once the extension confirms it', () => {
     render(<App post={() => {}} />);
     open();

@@ -204,12 +204,12 @@
         "kind": "allow_once"
       },
       {
-        "optionId": "acceptForSession",
-        "name": "Always allow",
+        "optionId": "acceptWithExecpolicyAmendment",
+        "name": "Always allow this command",
         "kind": "allow_always"
       },
       {
-        "optionId": "decline",
+        "optionId": "cancel",
         "name": "Deny",
         "kind": "reject_once"
       }

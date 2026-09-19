@@ -196,6 +196,59 @@ describe('CodexAdapter', () => {
     });
   });
 
+  it('offers the decisions the request advertises, and sends back the one the user chose', async () => {
+    const amendment = { acceptWithExecpolicyAmendment: { execpolicy_amendment: ['/bin/zsh', '-lc', 'printf hi'] } };
+    const { events, prompt } = setupAdapter(
+      CodexAdapter.make,
+      [
+        [
+          ...handshake(),
+          ...turnStart(4, 'write it'),
+          requestApproval(0, 'item/commandExecution/requestApproval', {
+            itemId: 'cmd_1',
+            command: '/bin/zsh -lc \'printf hi\'',
+            kind: 'command',
+            environmentId: null,
+            // This request takes neither acceptForSession nor decline.
+            availableDecisions: ['accept', amendment, 'cancel'],
+          }),
+          answer(0, { decision: amendment }),
+          turnCompleted('completed'),
+        ],
+      ],
+      undefined,
+      (options) => options.find((option) => option.kind === 'allow_always')?.optionId
+    );
+
+    expect(await prompt('write it')).toBe('end_turn');
+    expect(events.find((event) => event.type === 'permission_request')?.options).toEqual([
+      { optionId: 'accept', name: 'Allow once', kind: 'allow_once' },
+      { optionId: 'acceptWithExecpolicyAmendment', name: 'Always allow this command', kind: 'allow_always' },
+      // Nothing in the request refuses the command, so cancelling it is offered instead.
+      { optionId: 'cancel', name: 'Deny', kind: 'reject_once' },
+    ]);
+  });
+
+  it('refuses with the decision the request offers for it', async () => {
+    const { events, prompt } = setupAdapter(
+      CodexAdapter.make,
+      [
+        [
+          ...handshake(),
+          ...turnStart(4, 'write it'),
+          requestApproval(0, 'item/fileChange/requestApproval', { itemId: 'patch_1', availableDecisions: ['accept', 'decline', 'cancel'] }),
+          answer(0, { decision: 'decline' }),
+          turnCompleted('completed'),
+        ],
+      ],
+      undefined,
+      () => 'decline'
+    );
+
+    expect(await prompt('write it')).toBe('end_turn');
+    expect(events.find((event) => event.type === 'permission_request')?.options.map((option) => option.optionId)).toEqual(['accept', 'decline']);
+  });
+
   it('names the host when Codex asks to reach the network, and passes a refusal on', async () => {
     const { events, prompt } = setupAdapter(
       CodexAdapter.make,

@@ -167,6 +167,9 @@ interface ToolCallViewProps {
 const ToolCallView = memo(function ToolCallView({ tool, onRespond }: ToolCallViewProps) {
   const asking = tool.approval !== undefined && tool.approval.outcome === undefined;
   const input = tool.rawInput === undefined ? undefined : JSON.stringify(tool.rawInput, null, 2);
+  // What the tool returned, for agents that report it as their own value (Cursor's searches,
+  // Codex's MCP results and exit codes) rather than as content the thread can show as text.
+  const output = tool.rawOutput === undefined ? undefined : JSON.stringify(tool.rawOutput, null, 2);
   return (
     <div className={`tool-call tool-call-${tool.status}`}>
       <details className="tool-details" open={asking}>
@@ -182,6 +185,7 @@ const ToolCallView = memo(function ToolCallView({ tool, onRespond }: ToolCallVie
           {tool.content.map((content, index) => (
             <ToolContent key={index} content={content} />
           ))}
+          {output !== undefined && <pre className="tool-output">{output}</pre>}
         </div>
       </details>
       {tool.approval && <ApprovalCard approval={tool.approval} onRespond={onRespond} />}

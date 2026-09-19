@@ -130,12 +130,59 @@ function fileChangeTitle(paths: ReadonlyArray<string>): string {
   return paths.length === 1 ? `Edit ${paths[0]}` : `Edit ${paths.length} files`;
 }
 
-/** What the user can answer a Codex approval request with; the option IDs are Codex's own decisions. */
-export const CODEX_APPROVAL_OPTIONS: PermissionOption[] = [
-  { optionId: 'accept', name: 'Allow once', kind: 'allow_once' },
-  { optionId: 'acceptForSession', name: 'Always allow', kind: 'allow_always' },
-  { optionId: 'decline', name: 'Deny', kind: 'reject_once' },
-];
-
 /** The decision Codex is sent when nobody answers, because the turn was stopped or the thread closed. */
 export const CODEX_CANCELLED = 'cancel';
+
+/**
+ * A decision Codex offers: a name of its own, or an object carrying the amendment it would apply
+ * (an execpolicy rule for similar commands, a network rule for a host).
+ */
+const Decision = Schema.Union(Schema.String, Schema.Record({ key: Schema.String, value: WireMessage }));
+
+/** The decisions a request offers. Older servers send none, and only ever take the plain three. */
+export const AvailableDecisions = Schema.optional(Schema.NullOr(Schema.Array(Decision)));
+
+/** How each decision Codex knows is shown, keyed by the decision's name or, for an amendment, its one key. */
+const DECISION_OPTIONS = new Map<string, Omit<PermissionOption, 'optionId'>>([
+  ['accept', { name: 'Allow once', kind: 'allow_once' }],
+  ['acceptForSession', { name: 'Always allow', kind: 'allow_always' }],
+  ['acceptWithExecpolicyAmendment', { name: 'Always allow this command', kind: 'allow_always' }],
+  ['applyNetworkPolicyAmendment', { name: 'Always allow this host', kind: 'allow_always' }],
+  ['decline', { name: 'Deny', kind: 'reject_once' }],
+]);
+
+/** What Codex takes when a request says nothing about the decisions it offers. */
+const DEFAULT_DECISIONS: ReadonlyArray<typeof Decision.Type> = ['accept', 'acceptForSession', 'decline'];
+
+/** Refusing is always possible: cancelling the command is what Codex takes when it offers nothing else. */
+const REFUSE: PermissionOption = { optionId: CODEX_CANCELLED, name: 'Deny', kind: 'reject_once' };
+
+/** The answers a card offers, and the decision each one sends back to Codex. */
+export interface CodexApproval {
+  readonly options: ReadonlyArray<PermissionOption>;
+  /** The decision an option's ID stands for, since an amendment is an object rather than a name. */
+  readonly decisions: ReadonlyMap<string, WireMessage>;
+}
+
+/**
+ * The card for a request, built from the decisions it offers. A decision this build does not know
+ * is left out, and a request that offers no way to refuse is still given one, since cancelling the
+ * command is always a decision Codex takes.
+ */
+export function codexApproval(available: ReadonlyArray<typeof Decision.Type> | null | undefined): CodexApproval {
+  const options: PermissionOption[] = [];
+  const decisions = new Map<string, WireMessage>();
+  for (const decision of available ?? DEFAULT_DECISIONS) {
+    const name = Schema.is(Schema.String)(decision) ? decision : Object.keys(decision)[0];
+    const shown = name === undefined ? undefined : DECISION_OPTIONS.get(name);
+    if (shown && name !== undefined && !decisions.has(name)) {
+      options.push({ optionId: name, ...shown });
+      decisions.set(name, decision);
+    }
+  }
+  if (!options.some((option) => option.kind === 'reject_once' || option.kind === 'reject_always')) {
+    options.push(REFUSE);
+    decisions.set(REFUSE.optionId, CODEX_CANCELLED);
+  }
+  return { options, decisions };
+}
