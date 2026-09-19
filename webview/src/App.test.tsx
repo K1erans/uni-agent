@@ -1,10 +1,9 @@
-import type { VscodeButton, VscodeTextarea } from '@vscode-elements/elements';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '../../src/agents/events';
-import type { ExtensionMessage } from '../../src/protocol';
+import type { ExtensionMessage, ThreadInfo } from '../../src/protocol';
 import { App } from './App';
-import type { TranscriptItem } from './threadState';
+import type { TurnItem } from './threadState';
 import { Transcript } from './Transcript';
 
 function receive(message: ExtensionMessage) {
@@ -13,113 +12,241 @@ function receive(message: ExtensionMessage) {
   });
 }
 
+const THREAD: ThreadInfo = { id: 'thread-1', workspace: 'uni-agent' };
+
+/** Shows a thread with these events, as the extension does when the webview reports ready. */
+function open(events: AgentEvent[] = [{ type: 'session_started', agent: 'claude', sessionId: 's1' }], thread = THREAD) {
+  receive({ type: 'history', thread, events: events.map((event) => ({ event, at: 0 })) });
+}
+
+function event(agentEvent: AgentEvent, at = 0) {
+  receive({ type: 'event', threadId: THREAD.id, event: agentEvent, at });
+}
+
 const chunk = (text: string): AgentEvent => ({
   type: 'session_update',
   turnId: 't1',
   update: { sessionUpdate: 'agent_message_chunk', messageId: 'm:0', content: { type: 'text', text } },
 });
+const turnStarted = (text: string, turnId = 't1'): AgentEvent => ({ type: 'turn_started', turnId, prompt: [{ type: 'text', text }] });
+const turnEnded = (turnId = 't1'): AgentEvent => ({ type: 'turn_ended', turnId, stopReason: 'end_turn' });
 
-const sendButton = () => document.querySelector<VscodeButton>('vscode-button')!;
-
-function type(text: string) {
-  const textarea = document.querySelector<VscodeTextarea>('vscode-textarea')!;
-  textarea.value = text;
-  fireEvent.input(textarea);
-}
+const input = () => screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Message' });
+const sendButton = () => screen.getByRole<HTMLButtonElement>('button', { name: 'Send' });
+const type = (text: string) => fireEvent.change(input(), { target: { value: text } });
 
 describe('App', () => {
-  it('renders an empty thread with a composer', () => {
+  it('shows a new thread’s heading and an empty conversation above the composer', () => {
     render(<App post={() => {}} />);
+    open();
 
+    expect(screen.getByRole('heading', { name: 'New thread' })).toBeTruthy();
+    expect(screen.getByRole('img', { name: 'Status: Ready' })).toBeTruthy();
+    expect(screen.getByText('Claude Code')).toBeTruthy();
     expect(screen.getByText('No messages yet.')).toBeTruthy();
-    expect(document.querySelector('vscode-textarea')).not.toBeNull();
+    expect(input().placeholder).toBe('Message Claude Code…');
     expect(sendButton().disabled).toBe(true);
+    expect(screen.getByText('Enter to send · Shift + Enter for a new line').id).toBe(input().getAttribute('aria-describedby'));
   });
 
-  it('posts the draft as a prompt and clears it', () => {
+  it('cannot send before the extension has sent a thread', () => {
     const post = vi.fn();
     render(<App post={post} />);
+
+    type('Hello');
+    fireEvent.keyDown(input(), { key: 'Enter' });
+
+    expect(sendButton().disabled).toBe(true);
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it('posts the draft to the shown thread and clears it', () => {
+    const post = vi.fn();
+    render(<App post={post} />);
+    open();
 
     type('Hello');
     expect(sendButton().disabled).toBe(false);
     fireEvent.click(sendButton());
 
-    expect(post).toHaveBeenCalledWith({ type: 'prompt', text: 'Hello' });
-    expect(document.querySelector<VscodeTextarea>('vscode-textarea')!.value).toBe('');
+    expect(post).toHaveBeenCalledWith({ type: 'prompt', threadId: 'thread-1', text: 'Hello' });
+    expect(input().value).toBe('');
+  });
+
+  it('sends on Enter, but not on Shift+Enter or while an IME composition is open', () => {
+    const post = vi.fn();
+    render(<App post={post} />);
+    open();
+    type('こんにちは');
+
+    fireEvent.keyDown(input(), { key: 'Enter', isComposing: true });
+    fireEvent.keyDown(input(), { key: 'Enter', shiftKey: true });
+    expect(post).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input(), { key: 'Enter' });
+    expect(post).toHaveBeenCalledWith({ type: 'prompt', threadId: 'thread-1', text: 'こんにちは' });
   });
 
   it('blocks sending from the moment a prompt is posted, before the turn starts', () => {
     const post = vi.fn();
     render(<App post={post} />);
+    open();
 
     type('First');
     fireEvent.click(sendButton());
     type('Second');
 
     expect(sendButton().disabled).toBe(true);
-    fireEvent.click(sendButton());
+    fireEvent.keyDown(input(), { key: 'Enter' });
     expect(post).toHaveBeenCalledTimes(1);
-    expect(document.querySelector<VscodeTextarea>('vscode-textarea')!.value).toBe('Second');
+    expect(input().value).toBe('Second');
 
-    receive({ type: 'event', event: { type: 'turn_started', turnId: 't1', prompt: [{ type: 'text', text: 'First' }] } });
-    receive({ type: 'event', event: { type: 'turn_ended', turnId: 't1', stopReason: 'end_turn' } });
+    event(turnStarted('First'));
+    event(turnEnded());
     expect(sendButton().disabled).toBe(false);
   });
 
-  it('streams the reply in and blocks sending until the turn ends', () => {
+  it('streams the reply in, titles the thread, and blocks sending until the turn ends', () => {
     render(<App post={() => {}} />);
+    open();
 
-    receive({ type: 'event', event: { type: 'turn_started', turnId: 't1', prompt: [{ type: 'text', text: 'Count' }] } });
+    event(turnStarted('Count\nto two'), 1_000);
+    expect(screen.getByRole('heading', { name: 'Count' })).toBeTruthy();
+    expect(screen.getByText('Working…')).toBeTruthy();
+    expect(screen.getByRole('img', { name: 'Status: Working' })).toBeTruthy();
     type('Another');
     expect(sendButton().disabled).toBe(true);
 
-    receive({ type: 'event', event: chunk('1') });
-    receive({ type: 'event', event: chunk('\n2') });
+    event(chunk('1'));
+    event(chunk('\n2'));
     expect(screen.getByText(/1\s+2/)).toBeTruthy();
+    expect(screen.queryByText('Working…')).toBeNull();
 
-    receive({ type: 'event', event: { type: 'turn_ended', turnId: 't1', stopReason: 'end_turn' } });
+    event(turnEnded(), 43_000);
     expect(sendButton().disabled).toBe(false);
+    expect(screen.getByText('Worked for 42s')).toBeTruthy();
+  });
+
+  it('copies a reply and retries the latest prompt', () => {
+    const post = vi.fn();
+    render(<App post={post} />);
+    open();
+    event(turnStarted('Earlier', 't0'));
+    event(turnEnded('t0'));
+    event(turnStarted('Count'));
+    event(chunk('1 2 3'));
+
+    // Only the latest turn offers Retry, and not while it runs.
+    expect(screen.queryByRole('button', { name: 'Retry prompt' })).toBeNull();
+    event(turnEnded());
+    expect(screen.getAllByRole('button', { name: 'Retry prompt' })).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy response' }));
+    expect(post).toHaveBeenLastCalledWith({ type: 'copy', text: '1 2 3' });
+    expect(screen.getByText('Copied')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry prompt' }));
+    expect(post).toHaveBeenLastCalledWith({ type: 'prompt', threadId: 'thread-1', text: 'Count' });
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Retry prompt' }).disabled).toBe(true);
+  });
+
+  it('shows the session settings the agent reports, disabled until they can be changed', () => {
+    render(<App post={() => {}} />);
+    open();
+
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Model: Default model' }).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Workspace: uni-agent' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^Branch/ })).toBeNull();
+
+    event({ type: 'session_configured', model: 'claude-opus-5', permissionMode: 'acceptEdits' });
+    receive({ type: 'branch', name: 'main' });
+
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Model: claude-opus-5' }).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Permissions: Accept edits' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Reasoning: Default' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Branch: main' })).toBeTruthy();
+  });
+
+  it('replaces the conversation when the extension switches thread', () => {
+    const post = vi.fn();
+    render(<App post={post} />);
+    open();
+    event(turnStarted('First thread'));
+
+    open([{ type: 'session_started', agent: 'claude', sessionId: 's2' }], { id: 'thread-2', workspace: null });
+    expect(screen.queryByText('First thread')).toBeNull();
+    expect(screen.getByRole('heading', { name: 'New thread' })).toBeTruthy();
+    expect(screen.getByText('No folder open', { selector: '.meta-workspace' })).toBeTruthy();
+
+    // The first thread's turn was still running, but the new thread can take a prompt.
+    type('Second thread');
+    fireEvent.click(sendButton());
+    expect(post).toHaveBeenCalledWith({ type: 'prompt', threadId: 'thread-2', text: 'Second thread' });
+  });
+
+  it('keeps the unsent draft for when the sidebar is shown again', () => {
+    let saved = 'Half-written';
+    const drafts = { load: () => saved, save: (draft: string) => void (saved = draft) };
+    const { unmount } = render(<App post={() => {}} drafts={drafts} />);
+    expect(input().value).toBe('Half-written');
+
+    type('Half-written prompt');
+    unmount();
+    render(<App post={() => {}} drafts={drafts} />);
+    expect(input().value).toBe('Half-written prompt');
   });
 
   it('ignores messages that do not match the protocol', () => {
     render(<App post={() => {}} />);
+    open();
 
     act(() => {
-      window.dispatchEvent(new MessageEvent('message', { data: { type: 'event', event: { type: 'nonsense' } } }));
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'event', threadId: 'thread-1', event: { type: 'nonsense' }, at: 0 } }));
     });
 
     expect(screen.getByText('No messages yet.')).toBeTruthy();
   });
 
-  it('shows agent errors in the thread', () => {
+  it('shows agent errors in the thread and in the status', () => {
     render(<App post={() => {}} />);
 
-    receive({
-      type: 'history',
-      events: [{ type: 'error', code: 'binary_missing', message: 'Claude Code ("claude") was not found on PATH.' }],
-    });
+    open([
+      { type: 'session_started', agent: 'claude', sessionId: 's1' },
+      { type: 'error', code: 'binary_missing', message: 'Claude Code ("claude") was not found on PATH.' },
+    ]);
 
     expect(screen.getByRole('alert').textContent).toContain('was not found on PATH');
+    expect(screen.getByRole('img', { name: 'Status: Not found' })).toBeTruthy();
   });
 });
 
 describe('Transcript', () => {
-  it('re-renders only the item that is streaming', () => {
+  it('re-renders only the text that is streaming', () => {
     let finishedRenders = 0;
-    // A getter counts how often the finished item's component reads it, i.e. renders.
-    const finished: TranscriptItem = {
-      kind: 'agent_message',
+    // A getter counts how often the finished message's component reads it, i.e. renders.
+    const finished = {
       id: 'm:0',
       get text() {
         finishedRenders++;
         return 'Finished message';
       },
     };
-    const streaming = (text: string): TranscriptItem => ({ kind: 'agent_message', id: 'm:1', text });
+    const turn = (streaming: string): TurnItem => ({
+      kind: 'turn',
+      id: 't1',
+      prompt: 'Go',
+      startedAt: 0,
+      endedAt: undefined,
+      stopReason: undefined,
+      thoughts: [],
+      messages: [finished, { id: 'm:1', text: streaming }],
+      errors: [],
+    });
+    const noop = () => {};
 
-    const { rerender } = render(<Transcript items={[finished, streaming('Str')]} running />);
+    const { rerender } = render(<Transcript items={[turn('Str')]} running onRetry={noop} onCopy={noop} />);
     const rendersAfterMount = finishedRenders;
-    rerender(<Transcript items={[finished, streaming('Streaming')]} running />);
+    rerender(<Transcript items={[turn('Streaming')]} running onRetry={noop} onCopy={noop} />);
 
     expect(screen.getByText('Streaming')).toBeTruthy();
     expect(finishedRenders).toBe(rendersAfterMount);

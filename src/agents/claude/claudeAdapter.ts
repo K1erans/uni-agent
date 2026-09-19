@@ -251,6 +251,10 @@ export class ClaudeAdapter implements AgentAdapter {
       this.sessionExists = true;
     }
     switch (message.type) {
+      case 'system':
+        return message.subtype === 'init'
+          ? this.emit({ type: 'session_configured', model: message.model, permissionMode: message.permissionMode })
+          : Effect.void;
       case 'stream_event':
         return this.handleStreamEvent(message);
       case 'assistant':

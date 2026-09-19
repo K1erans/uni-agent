@@ -23,17 +23,11 @@ export default defineConfig({
         },
       },
       {
-        // Lit and @lit/react ship Node builds that skip client-side property updates, so resolve
-        // (and inline, so Vite does the resolving) their browser builds instead.
-        resolve: { conditions: ['browser'] },
         test: {
           name: 'webview',
           include: ['webview/**/*.test.{ts,tsx}'],
           environment: 'jsdom',
           setupFiles: ['webview/test/setup.ts'],
-          server: {
-            deps: { inline: [/node_modules\/(lit|lit-html|lit-element|@lit\/[^/]+|@vscode-elements\/[^/]+)\//] },
-          },
         },
       },
     ],

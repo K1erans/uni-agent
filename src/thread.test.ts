@@ -1,91 +1,88 @@
 import { Effect, Exit, Scope } from 'effect';
 import { describe, expect, it, vi } from 'vitest';
-import type { AgentAdapter, EventSink } from './agents/adapter';
-import type { ContentBlock, StopReason } from './agents/events';
-import type { ExtensionMessage, WebviewMessage } from './protocol';
+import type { ExtensionMessage } from './protocol';
+import { FakeAdapter } from './testing/fakeAdapter';
 import { makeThread } from './thread';
 
-/** An adapter whose turns run until the test ends them. */
-class FakeAdapter implements AgentAdapter {
-  readonly agent = 'claude' as const;
-  readonly sessionId = 'session-1';
-  readonly prompts: ReadonlyArray<ContentBlock>[] = [];
-  disposed = false;
-
-  constructor(private readonly onEvent: EventSink) {}
-
-  prompt(prompt: ReadonlyArray<ContentBlock>): Effect.Effect<StopReason> {
-    return Effect.andThen(
-      Effect.suspend(() => {
-        this.prompts.push(prompt);
-        return this.onEvent({ type: 'turn_started', turnId: `turn-${this.prompts.length}`, prompt });
-      }),
-      Effect.never
-    );
-  }
-
-  cancel(): Effect.Effect<void> {
-    return Effect.void;
-  }
-
-  endTurn(): Promise<void> {
-    return Effect.runPromise(this.onEvent({ type: 'turn_ended', turnId: `turn-${this.prompts.length}`, stopReason: 'end_turn' }));
-  }
-}
-
-/** Opens a thread over a fake adapter; `handle` lets forked turns start before it returns. */
+/** Opens a thread over a fake adapter; `prompt` lets forked turns start before it returns. */
 function setup() {
-  let adapter: FakeAdapter | undefined;
+  const made: FakeAdapter[] = [];
   const scope = Effect.runSync(Scope.make());
   const thread = Effect.runSync(
-    makeThread((onEvent) =>
-      Effect.gen(function* () {
-        const fake = new FakeAdapter(onEvent);
-        yield* onEvent({ type: 'session_started', agent: 'claude', sessionId: fake.sessionId });
-        yield* Effect.addFinalizer(() => Effect.sync(() => (fake.disposed = true)));
-        adapter = fake;
-        return fake;
-      })
-    ).pipe(Scope.extend(scope))
+    makeThread('thread-1', { cwd: '/work/uni-agent', name: 'uni-agent' }, FakeAdapter.maker(made)).pipe(Scope.extend(scope))
   );
   return {
-    adapter: adapter!,
+    thread,
+    adapter: made[0],
     attach: (post: (message: ExtensionMessage) => void) => Effect.runSync(thread.attach((message) => Effect.sync(() => post(message)))),
-    handle: (message: WebviewMessage) => Effect.runPromise(Effect.andThen(thread.handle(message), Effect.yieldNow())),
+    prompt: (text: string) => Effect.runPromise(Effect.andThen(thread.prompt(text), Effect.yieldNow())),
     close: () => Effect.runPromise(Scope.close(scope, Exit.void)),
   };
 }
 
 describe('Thread', () => {
   it('replays its history to every webview that attaches, then forwards new events', async () => {
-    const { adapter, attach, handle } = setup();
+    const { adapter, attach, prompt } = setup();
     const first = vi.fn();
     attach(first);
-    await handle({ type: 'prompt', text: 'hi' });
+    await prompt('hi');
 
-    // A reloaded webview gets everything so far in one message.
+    // A reloaded webview gets the thread and everything so far, with when each event arrived.
     const second = vi.fn();
     attach(second);
     expect(second).toHaveBeenCalledWith({
       type: 'history',
-      events: [expect.objectContaining({ type: 'session_started' }), expect.objectContaining({ type: 'turn_started' })],
+      thread: { id: 'thread-1', workspace: 'uni-agent' },
+      events: [
+        { event: expect.objectContaining({ type: 'session_started' }), at: expect.any(Number) },
+        { event: expect.objectContaining({ type: 'turn_started' }), at: expect.any(Number) },
+      ],
     });
 
     await adapter.endTurn();
-    expect(second).toHaveBeenLastCalledWith({ type: 'event', event: expect.objectContaining({ type: 'turn_ended' }) });
+    expect(second).toHaveBeenLastCalledWith({
+      type: 'event',
+      threadId: 'thread-1',
+      event: expect.objectContaining({ type: 'turn_ended' }),
+      at: expect.any(Number),
+    });
     expect(first).toHaveBeenCalledTimes(2);
   });
 
-  it('ignores prompts while a turn is running and blank prompts', async () => {
-    const { adapter, handle } = setup();
+  it('stops forwarding events once detached', async () => {
+    const { thread, adapter, attach, prompt } = setup();
+    const post = vi.fn();
+    attach(post);
+    Effect.runSync(thread.detach());
 
-    await handle({ type: 'prompt', text: '   ' });
+    await prompt('hi');
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(adapter.prompts).toHaveLength(1);
+  });
+
+  it('ignores prompts while a turn is running and blank prompts', async () => {
+    const { adapter, prompt } = setup();
+
+    await prompt('   ');
     // Sent back to back, before the first turn's fiber has started.
-    await Promise.all([handle({ type: 'prompt', text: 'one' }), handle({ type: 'prompt', text: 'two' })]);
+    await Promise.all([prompt('one'), prompt('two')]);
     await adapter.endTurn();
-    await handle({ type: 'prompt', text: 'three' });
+    await prompt('three');
 
     expect(adapter.prompts.map(([block]) => block.text)).toEqual(['one', 'three']);
+  });
+
+  it('takes its title from the first line of its first prompt', async () => {
+    const { thread, adapter, prompt } = setup();
+    expect(thread.isEmpty).toBe(true);
+    expect(thread.title).toBeUndefined();
+
+    await prompt('  Add thread search\nKeep the styling consistent.');
+    await adapter.endTurn();
+    await prompt('And a keyboard shortcut');
+
+    expect(thread.isEmpty).toBe(false);
+    expect(thread.title).toBe('Add thread search');
   });
 
   it('stops the adapter when its scope closes', async () => {

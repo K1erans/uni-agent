@@ -30,31 +30,58 @@
     "views": {
       "uniAgent": [
         {
-          "id": "uniAgent.threads",
-          "name": "Threads"
+          "type": "webview",
+          "id": "uniAgent.sidebar",
+          "name": "Uni Agent",
+          "icon": "media/icon.svg"
         }
       ]
     },
-    "viewsWelcome": [
-      {
-        "view": "uniAgent.threads",
-        "contents": "No threads yet.\n[New Thread](command:uniAgent.newThread)"
-      }
-    ],
     "commands": [
       {
         "command": "uniAgent.newThread",
         "title": "New Thread",
         "category": "Uni Agent",
         "icon": "$(add)"
+      },
+      {
+        "command": "uniAgent.showThreadHistory",
+        "title": "Thread History",
+        "category": "Uni Agent",
+        "icon": "$(history)"
+      },
+      {
+        "command": "uniAgent.showLogs",
+        "title": "Show Logs",
+        "category": "Uni Agent"
+      },
+      {
+        "command": "uniAgent.openSettings",
+        "title": "Open Settings",
+        "category": "Uni Agent"
       }
     ],
     "menus": {
       "view/title": [
         {
           "command": "uniAgent.newThread",
-          "when": "view == uniAgent.threads",
-          "group": "navigation"
+          "when": "view == uniAgent.sidebar",
+          "group": "navigation@1"
+        },
+        {
+          "command": "uniAgent.showThreadHistory",
+          "when": "view == uniAgent.sidebar",
+          "group": "navigation@2"
+        },
+        {
+          "command": "uniAgent.showLogs",
+          "when": "view == uniAgent.sidebar",
+          "group": "1_uniAgent@1"
+        },
+        {
+          "command": "uniAgent.openSettings",
+          "when": "view == uniAgent.sidebar",
+          "group": "1_uniAgent@2"
         }
       ]
     },
@@ -93,8 +120,6 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.277",
-    "@vscode-elements/elements": "^2.5.1",
-    "@vscode-elements/react-elements": "^2.4.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },

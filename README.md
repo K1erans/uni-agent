@@ -6,9 +6,10 @@ for its lifetime; the model can change within that agent.
 
 ## Status
 
-**Uni Agent: New Thread** opens a chat tab that talks to Claude Code: type a prompt and
-the reply streams in. Codex and Cursor, tool calls, persistence and the agent picker are
-still to come.
+The **Uni Agent** sidebar holds a chat thread with Claude Code: type a prompt and the reply
+streams in. The composer shows the model and permission mode Claude reports, and the
+workspace folder and git branch the thread runs in. Codex and Cursor, tool calls, changing
+the model or permissions, persistence and the agent picker are still to come.
 
 Uni Agent never stores credentials and discovers models from each agent at runtime, so
 there are no API-key or model settings.
@@ -39,21 +40,25 @@ Press <kbd>F5</kbd> to launch an Extension Development Host with Uni Agent loade
 | --- | --- |
 | Activation, `node:sqlite` check, command registration, the extension's Effect scope and runtime | `src/extension.ts`, `src/nodeSqlite.ts` |
 | Effect services: agent SDK, executable lookup, IDs; VS Code disposables in a scope; typed settings | `src/agents/claude/claudeAdapter.ts`, `src/agents/findExecutable.ts`, `src/ids.ts`, `src/disposable.ts`, `src/settings.ts` |
-| Threads tree view (native, activity bar) | `src/threadsTreeDataProvider.ts` |
-| Thread editor tab (webview host, CSP) | `src/threadPanel.ts` |
+| Sidebar webview view (host, CSP) | `src/sidebar.ts` |
 | Webview ↔ extension message schemas, decoded on both sides | `src/protocol.ts` |
-| Thread: one scoped adapter, its event history, replayed to the webview on load | `src/thread.ts` |
+| Thread: one scoped adapter, its timestamped event history, replayed to the webview on load | `src/thread.ts` |
+| The window's threads, which one the sidebar shows, and its branch | `src/threads.ts` |
+| Current git branch, from VS Code's built-in Git extension | `src/branches.ts`, `src/git.ts` |
 | Normalised, ACP-shaped event model (Effect schemas) and adapter interface | `src/agents/events.ts`, `src/agents/adapter.ts` |
 | Claude adapter (Claude Agent SDK over the user's `claude` binary) | `src/agents/claude/` |
 | NDJSON traffic record/replay | `src/agents/traffic.ts`, `src/agents/claude/claudeTraffic.ts` |
-| Thread chat UI (React + `@vscode-elements`) | `webview/src/` |
+| Sidebar chat UI (React, VS Code theme variables) | `webview/src/` |
 | Effect logger that writes to the output channel | `src/logger.ts` |
 | Bundling (extension + webview) | `esbuild.js` |
 
 ### Commands
 
-- **Uni Agent: New Thread** — opens a new thread in an editor tab (also the `+` on the
-  Threads view).
+- **Uni Agent: New Thread** — shows a new thread in the sidebar (the `+` in its title bar).
+  A thread nobody has prompted yet is reused.
+- **Uni Agent: Thread History** — switches the sidebar to another of this window's threads.
+  Threads last until the window closes; they are not persisted yet.
+- **Uni Agent: Show Logs**, **Uni Agent: Open Settings** — also in the sidebar's `···` menu.
 
 ### Settings
 
