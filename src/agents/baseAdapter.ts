@@ -1,6 +1,7 @@
 import { Deferred, Effect, Option, type Context, type Scope } from 'effect';
 import type { Ids } from '../ids';
-import { binaryMissingMessage, TurnInProgress, type AdapterOptions, type AgentAdapter } from './adapter';
+import { binaryMissingMessage, TurnInProgress, type AdapterOptions, type AgentAdapter, type UnknownPermissionRequest } from './adapter';
+import { Approvals } from './approvals';
 import { AGENT_NAMES, type AgentEvent, type AgentKind, type ContentBlock, type StopReason } from './events';
 import type { Executables } from './findExecutable';
 import type { Turn } from './turn';
@@ -15,6 +16,9 @@ export abstract class BaseAdapter<T extends Turn> implements AgentAdapter {
   /** The agent CLI's name on PATH. */
   protected abstract readonly command: string;
 
+  /** The permission requests waiting for the user, shared by every turn of this adapter. */
+  protected readonly approvals: Approvals;
+
   protected turn: T | undefined;
   /** Whether the scope has closed, so the process stopping is expected rather than a crash. */
   protected disposed = false;
@@ -24,7 +28,9 @@ export abstract class BaseAdapter<T extends Turn> implements AgentAdapter {
     private readonly executables: Context.Tag.Service<Executables>,
     protected readonly ids: Context.Tag.Service<Ids>,
     protected readonly scope: Scope.Scope
-  ) {}
+  ) {
+    this.approvals = new Approvals((event) => this.options.onEvent(event));
+  }
 
   /** Makes a turn of this adapter's kind. */
   protected abstract newTurn(id: string, ended: Deferred.Deferred<StopReason>): T;
@@ -74,11 +80,16 @@ export abstract class BaseAdapter<T extends Turn> implements AgentAdapter {
     return Effect.suspend(() => {
       const turn = this.turn;
       if (!turn) {
-        return Effect.void;
+        return this.approvals.cancelAll();
       }
       turn.cancelRequested = true;
-      return this.interrupt(turn);
+      // The agent is told the answer is cancelled before it is interrupted, so it is never left waiting.
+      return Effect.zipRight(this.approvals.cancelAll(), this.interrupt(turn));
     });
+  }
+
+  respond(requestId: string, optionId: string): Effect.Effect<void, UnknownPermissionRequest> {
+    return this.approvals.respond(requestId, optionId);
   }
 
   /** Ends `turn` if it is still the running one. */
@@ -88,7 +99,8 @@ export abstract class BaseAdapter<T extends Turn> implements AgentAdapter {
         return Effect.void;
       }
       this.turn = undefined;
-      return turn.end(stopReason);
+      // Nothing answers a request once its turn is over, so none is left waiting.
+      return Effect.zipRight(this.approvals.cancelAll(), turn.end(stopReason));
     });
   }
 
@@ -116,6 +128,7 @@ export abstract class BaseAdapter<T extends Turn> implements AgentAdapter {
   private dispose(): Effect.Effect<void> {
     return Effect.gen(this, function* () {
       this.disposed = true;
+      yield* this.approvals.cancelAll();
       yield* this.stop();
       if (this.turn) {
         yield* this.endTurn(this.turn, 'cancelled');

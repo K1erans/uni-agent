@@ -3,8 +3,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { Schema } from 'effect';
 import { describe, expect, it } from 'vitest';
+import type { AgentEvent } from '../events';
 import { redactUnreadNotifications } from '../stdioTraffic';
 import type { WireMessage } from '../traffic';
+import { APPROVAL_PROMPT, TOOL_CALL_PROMPT } from '../../testing/prompts';
 import { recordFixture } from '../../testing/stdioFixtures';
 import { CODEX_NOTIFICATIONS, CodexAdapter } from './codexAdapter';
 
@@ -43,6 +45,23 @@ describe('Codex adapter (live)', () => {
     expect(events.at(-1)).toMatchObject({ type: 'turn_ended', stopReason: 'end_turn' });
   });
 
+  it('records a tool call the agent runs by itself', async () => {
+    const events = await record('tool-call', TOOL_CALL_PROMPT);
+
+    expect(events.filter((event) => event.type === 'error')).toEqual([]);
+    expect(toolCalls(events)).not.toEqual([]);
+    expect(events.at(-1)).toMatchObject({ type: 'turn_ended', stopReason: 'end_turn' });
+  });
+
+  it('records an approval round-trip', async () => {
+    const events = await record('approval', APPROVAL_PROMPT);
+
+    expect(events.filter((event) => event.type === 'error')).toEqual([]);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'permission_request' }));
+    expect(events).toContainEqual(expect.objectContaining({ type: 'permission_resolved' }));
+    expect(events.at(-1)).toMatchObject({ type: 'turn_ended', stopReason: 'end_turn' });
+  });
+
   it('records a signed-out Codex', async () => {
     // An empty Codex home has no sign-in, so this never reads the user's own credentials.
     const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'uni-agent-signed-out-'));
@@ -52,3 +71,8 @@ describe('Codex adapter (live)', () => {
     expect(events.at(-1)).toMatchObject({ type: 'turn_ended', stopReason: 'error' });
   });
 });
+
+/** The tool calls the events opened. */
+function toolCalls(events: AgentEvent[]) {
+  return events.filter((event) => event.type === 'session_update' && event.update.sessionUpdate === 'tool_call');
+}

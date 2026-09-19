@@ -9,6 +9,7 @@ import { Executables } from '../agents/findExecutable';
 import { Stdio, type StdioCommand } from '../agents/stdio';
 import { recordedCwd, recordingStdio, replayStdio } from '../agents/stdioTraffic';
 import { readTraffic, TrafficRecorder, type TrafficLine, type WireMessage } from '../agents/traffic';
+import { allowOnce, recordingSink, type Answer } from './eventSink';
 
 /** Builds an adapter for an agent Uni Agent runs over stdio, such as `CodexAdapter.make`. */
 export type MakeStdioAdapter = (options: AdapterOptions) => Effect.Effect<AgentAdapter, never, Stdio | Executables | Ids | Scope.Scope>;
@@ -17,7 +18,7 @@ export type MakeStdioAdapter = (options: AdapterOptions) => Effect.Effect<AgentA
  * Replays a fixture recorded by {@link recordFixture} through the adapter, prompting it as the
  * recording did, and returns the normalised events it emitted. Turn IDs are `turn-1`, `turn-2`...
  */
-export function replayFixture(make: MakeStdioAdapter, fixture: string, prompt: string): Promise<AgentEvent[]> {
+export function replayFixture(make: MakeStdioAdapter, fixture: string, prompt: string, answer: Answer = allowOnce): Promise<AgentEvent[]> {
   const traffic = Effect.runSync(readTraffic(fixture));
   let turns = 0;
   const services = Layer.mergeAll(
@@ -25,7 +26,7 @@ export function replayFixture(make: MakeStdioAdapter, fixture: string, prompt: s
     Layer.succeed(Executables, { find: (name) => Effect.succeed(Option.some(`/usr/local/bin/${name}`)) }),
     Layer.succeed(Ids, { next: Effect.sync(() => `turn-${++turns}`) })
   );
-  return runPrompt(make, recordedCwd(traffic), prompt, services);
+  return runPrompt(make, recordedCwd(traffic), prompt, services, answer);
 }
 
 /**
@@ -37,7 +38,8 @@ export function recordFixture(
   fixture: string,
   prompt: string,
   redact: (message: WireMessage) => WireMessage,
-  env?: NodeJS.ProcessEnv
+  env?: NodeJS.ProcessEnv,
+  answer: Answer = allowOnce
 ): Promise<AgentEvent[]> {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'uni-agent-live-'));
   const recording = Layer.effect(
@@ -48,19 +50,21 @@ export function recordFixture(
       return recordingStdio({ spawn: (command) => live.spawn({ ...command, env }) }, recorder, redact);
     })
   ).pipe(Layer.provide(Stdio.live));
-  return runPrompt(make, cwd, prompt, Layer.mergeAll(recording, Executables.live, Ids.live));
+  return runPrompt(make, cwd, prompt, Layer.mergeAll(recording, Executables.live, Ids.live), answer);
 }
 
 async function runPrompt(
   make: MakeStdioAdapter,
   cwd: string,
   prompt: string,
-  services: Layer.Layer<Stdio | Executables | Ids>
+  services: Layer.Layer<Stdio | Executables | Ids>,
+  answer: Answer
 ): Promise<AgentEvent[]> {
   const events: AgentEvent[] = [];
   await Effect.runPromise(
     Effect.gen(function* () {
-      const adapter = yield* make({ cwd, executablePath: Option.none(), onEvent: (event) => Effect.sync(() => events.push(event)) });
+      let adapter: AgentAdapter | undefined;
+      adapter = yield* make({ cwd, executablePath: Option.none(), onEvent: recordingSink(events, answer, () => adapter) });
       yield* adapter.prompt([{ type: 'text', text: prompt }]);
     }).pipe(Effect.scoped, Effect.provide(services))
   );
@@ -82,6 +86,8 @@ export const rpcError = (id: number, code: number, message: string): TrafficLine
 export const notification = (method: string, params: WireMessage): TrafficLine => ({ dir: 'recv', data: { method, params } });
 /** A request from the agent to the client. */
 export const agentRequest = (id: number, method: string, params: WireMessage): TrafficLine => ({ dir: 'recv', data: { id, method, params } });
+/** The client answering a request from the agent. */
+export const answer = (id: number, value: WireMessage): TrafficLine => ({ dir: 'send', data: { jsonrpc: '2.0', id, result: value } });
 /** The client declining an agent request it does not support. */
 export const methodNotFound = (id: number, method: string): TrafficLine => ({
   dir: 'send',
@@ -92,11 +98,14 @@ export const exit = (error: string): TrafficLine => ({ dir: 'exit', error });
 /**
  * Builds an adapter over fake agent processes, each replaying the next of `processes`, in a scope
  * the test can close. Turn IDs are `turn-1`, `turn-2`...
+ *
+ * @param answer How the user answers a permission request; no answer leaves the request open.
  */
 export function setupAdapter(
   make: MakeStdioAdapter,
   processes: ReadonlyArray<readonly TrafficLine[]>,
-  find: (name: string) => Option.Option<string> = (name) => Option.some(`/usr/local/bin/${name}`)
+  find: (name: string) => Option.Option<string> = (name) => Option.some(`/usr/local/bin/${name}`),
+  answer?: Answer
 ) {
   const events: AgentEvent[] = [];
   const spawned: StdioCommand[] = [];
@@ -108,12 +117,15 @@ export function setupAdapter(
     Layer.succeed(Ids, { next: Effect.sync(() => `turn-${++turns}`) })
   );
   const scope = Effect.runSync(Scope.make());
-  const adapter = Effect.runSync(
-    make({ cwd: '/workspace', executablePath: Option.none(), onEvent: (event) => Effect.sync(() => events.push(event)) }).pipe(
+  // The sink reaches the adapter to answer its asks, and only ever runs once it has been built.
+  let built: AgentAdapter | undefined;
+  built = Effect.runSync(
+    make({ cwd: '/workspace', executablePath: Option.none(), onEvent: recordingSink(events, answer, () => built) }).pipe(
       Scope.extend(scope),
       Effect.provide(services)
     )
   );
+  const adapter = built;
   return {
     adapter,
     events,
@@ -121,6 +133,13 @@ export function setupAdapter(
     prompt: (text: string) => Effect.runPromise(adapter.prompt([{ type: 'text', text }])),
     dispose: () => Effect.runPromise(Scope.close(scope, Exit.void)),
     errors: () => events.filter((event) => event.type === 'error'),
+    /** The tool call updates in the events, as the adapter sent them. */
+    toolUpdates: () =>
+      events.flatMap((event) =>
+        event.type === 'session_update' && (event.update.sessionUpdate === 'tool_call' || event.update.sessionUpdate === 'tool_call_update')
+          ? [event.update]
+          : []
+      ),
     /** The text of each chunk, with its kind and message ID. */
     chunks: () =>
       events.flatMap((event) =>

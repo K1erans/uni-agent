@@ -61,13 +61,16 @@ export function recordingStdio(
 }
 
 const isNotification = Schema.is(Schema.Struct({ method: Schema.String, params: WireMessage }));
+/** A request carries an ID, since the agent is waiting for an answer to it. */
+const isRequest = Schema.is(Schema.Struct({ id: Schema.Union(Schema.String, Schema.Number) }));
 
 /**
  * Drops the params of every notification an adapter does not read, keeping its method so the
  * fixture still shows when it arrived. Unread notifications often describe the user's own setup.
+ * Requests are kept whole: the adapter answers them, so a replay needs what they asked.
  */
 export function redactUnreadNotifications(read: ReadonlySet<string>): (message: WireMessage) => WireMessage {
-  return (message) => (isNotification(message) && !read.has(message.method) ? { method: message.method } : message);
+  return (message) => (isNotification(message) && !isRequest(message) && !read.has(message.method) ? { method: message.method } : message);
 }
 
 const hasCwd = Schema.is(Schema.Struct({ params: Schema.Struct({ cwd: Schema.String }) }));

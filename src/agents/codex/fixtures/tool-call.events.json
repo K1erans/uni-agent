@@ -1,0 +1,324 @@
+[
+  {
+    "type": "turn_started",
+    "turnId": "turn-1",
+    "prompt": [
+      {
+        "type": "text",
+        "text": "Search this directory for the text TODO and reply with how many matches you found."
+      }
+    ]
+  },
+  {
+    "type": "session_started",
+    "agent": "codex",
+    "sessionId": "01a0bbbb-71f1-7e03-aa07-29209bebb9b8"
+  },
+  {
+    "type": "session_configured",
+    "model": "gpt-6-astra",
+    "permissionMode": "on-request"
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf0919dfb487d2933d5378838787bb",
+      "content": {
+        "type": "text",
+        "text": "I"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf0919dfb487d2933d5378838787bb",
+      "content": {
+        "type": "text",
+        "text": "’ll"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf0919dfb487d2933d5378838787bb",
+      "content": {
+        "type": "text",
+        "text": " search"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf0919dfb487d2933d5378838787bb",
+      "content": {
+        "type": "text",
+        "text": " this"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf0919dfb487d2933d5378838787bb",
+      "content": {
+        "type": "text",
+        "text": " directory"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf0919dfb487d2933d5378838787bb",
+      "content": {
+        "type": "text",
+        "text": " for"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf0919dfb487d2933d5378838787bb",
+      "content": {
+        "type": "text",
+        "text": " `"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf0919dfb487d2933d5378838787bb",
+      "content": {
+        "type": "text",
+        "text": "TODO"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf0919dfb487d2933d5378838787bb",
+      "content": {
+        "type": "text",
+        "text": "`"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf0919dfb487d2933d5378838787bb",
+      "content": {
+        "type": "text",
+        "text": " and"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf0919dfb487d2933d5378838787bb",
+      "content": {
+        "type": "text",
+        "text": " count"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf0919dfb487d2933d5378838787bb",
+      "content": {
+        "type": "text",
+        "text": " the"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf0919dfb487d2933d5378838787bb",
+      "content": {
+        "type": "text",
+        "text": " matches"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf0919dfb487d2933d5378838787bb",
+      "content": {
+        "type": "text",
+        "text": "."
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "tool_call",
+      "toolCallId": "exec-310b9a5a-f210-469c-8d8b-aa4e3af5cdab",
+      "title": "/bin/zsh -lc \"rg -o --hidden --no-ignore --text 'TODO' .\"",
+      "kind": "execute",
+      "status": "in_progress",
+      "rawInput": {
+        "command": "/bin/zsh -lc \"rg -o --hidden --no-ignore --text 'TODO' .\"",
+        "cwd": "/var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-BYL8Fd"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "exec-310b9a5a-f210-469c-8d8b-aa4e3af5cdab",
+      "title": "/bin/zsh -lc \"rg -o --hidden --no-ignore --text 'TODO' .\"",
+      "kind": "execute",
+      "status": "failed",
+      "rawInput": {
+        "command": "/bin/zsh -lc \"rg -o --hidden --no-ignore --text 'TODO' .\"",
+        "cwd": "/var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-BYL8Fd"
+      },
+      "rawOutput": {
+        "exitCode": 1
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf092358e887d2822aea7cd6d77afd",
+      "content": {
+        "type": "text",
+        "text": "Found"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf092358e887d2822aea7cd6d77afd",
+      "content": {
+        "type": "text",
+        "text": " "
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf092358e887d2822aea7cd6d77afd",
+      "content": {
+        "type": "text",
+        "text": "0"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf092358e887d2822aea7cd6d77afd",
+      "content": {
+        "type": "text",
+        "text": " matches"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf092358e887d2822aea7cd6d77afd",
+      "content": {
+        "type": "text",
+        "text": " for"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf092358e887d2822aea7cd6d77afd",
+      "content": {
+        "type": "text",
+        "text": " `"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf092358e887d2822aea7cd6d77afd",
+      "content": {
+        "type": "text",
+        "text": "TODO"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_05b18581e272d9ce016aaf092358e887d2822aea7cd6d77afd",
+      "content": {
+        "type": "text",
+        "text": "`."
+      }
+    }
+  },
+  {
+    "type": "turn_ended",
+    "turnId": "turn-1",
+    "stopReason": "end_turn"
+  }
+]

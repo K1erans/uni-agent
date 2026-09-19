@@ -65,8 +65,12 @@ export abstract class JsonRpcAdapter<T extends Turn> extends BaseAdapter<T> {
 
   protected abstract handleNotification(method: string, params: WireMessage | undefined): Effect.Effect<void, MalformedMessage>;
 
-  /** Answers a request from the agent; by default none are supported, so each gets "method not found". */
-  protected handleRequest(_method: string, _params: WireMessage | undefined): Effect.Effect<Option.Option<WireMessage>, MalformedMessage> {
+  /**
+   * Answers a request from the agent; by default none are supported, so each gets "method not
+   * found". The answer itself is an effect run on a fiber of the connection's, so a request the
+   * user has to answer does not hold up the agent's other messages.
+   */
+  protected handleRequest(_method: string, _params: WireMessage | undefined): Effect.Effect<Option.Option<Effect.Effect<WireMessage>>, MalformedMessage> {
     return Effect.succeedNone;
   }
 

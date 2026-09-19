@@ -241,11 +241,79 @@ describe('App', () => {
   });
 });
 
+describe('App approvals', () => {
+  const permissionRequest: AgentEvent = {
+    type: 'permission_request',
+    turnId: 't1',
+    requestId: 'permission-1',
+    toolCall: { toolCallId: 'call_1', title: 'rm notes.md', kind: 'delete', status: 'pending', rawInput: { command: 'rm notes.md' } },
+    options: [
+      { optionId: 'allow', name: 'Allow once', kind: 'allow_once' },
+      { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+    ],
+  };
+
+  it('shows the tool call, its input and the ask, and posts the answer the user picks', () => {
+    const post = vi.fn();
+    render(<App post={post} />);
+    open();
+    event(turnStarted('Tidy up'));
+    event(permissionRequest);
+
+    expect(screen.getByRole('img', { name: 'Status: Needs approval' })).toBeTruthy();
+    expect(screen.getByText('rm notes.md')).toBeTruthy();
+    expect(screen.getByText(/"command": "rm notes.md"/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Allow once' }));
+
+    expect(post).toHaveBeenCalledWith({ type: 'permission_response', threadId: 'thread-1', requestId: 'permission-1', optionId: 'allow' });
+  });
+
+  it('shows what a tool returned, whether as content or as the agent’s own value', () => {
+    render(<App post={() => {}} />);
+    open();
+    event(turnStarted('Search'));
+    event({
+      type: 'session_update',
+      turnId: 't1',
+      update: { sessionUpdate: 'tool_call', toolCallId: 'call_1', title: 'grep TODO', kind: 'search', status: 'in_progress', rawInput: { pattern: 'TODO' } },
+    });
+    event({
+      type: 'session_update',
+      turnId: 't1',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call_1',
+        status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text: 'notes.md:3' } }],
+        rawOutput: { totalMatches: 1 },
+      },
+    });
+
+    expect(screen.getByText('notes.md:3')).toBeTruthy();
+    expect(screen.getByText(/"totalMatches": 1/)).toBeTruthy();
+    expect(screen.getByText('Done')).toBeTruthy();
+  });
+
+  it('replaces the ask with the answer once the extension confirms it', () => {
+    render(<App post={() => {}} />);
+    open();
+    event(turnStarted('Tidy up'));
+    event(permissionRequest);
+    event({ type: 'permission_resolved', turnId: 't1', requestId: 'permission-1', outcome: { outcome: 'selected', optionId: 'deny' } });
+
+    expect(screen.queryByRole('button', { name: 'Allow once' })).toBeNull();
+    expect(screen.getByRole('status').textContent).toBe('Deny');
+    expect(screen.getByRole('img', { name: 'Status: Working' })).toBeTruthy();
+  });
+});
+
 describe('Transcript', () => {
   it('re-renders only the text that is streaming', () => {
     let finishedRenders = 0;
     // A getter counts how often the finished message's component reads it, i.e. renders.
     const finished = {
+      index: 0,
       id: 'm:0',
       get text() {
         finishedRenders++;
@@ -260,14 +328,15 @@ describe('Transcript', () => {
       endedAt: undefined,
       stopReason: undefined,
       thoughts: [],
-      messages: [finished, { id: 'm:1', text: streaming }],
+      messages: [finished, { id: 'm:1', text: streaming, index: 1 }],
+      tools: [],
       errors: [],
     });
     const noop = () => {};
 
-    const { rerender } = render(<Transcript items={[turn('Str')]} running onRetry={noop} onCopy={noop} />);
+    const { rerender } = render(<Transcript items={[turn('Str')]} running onRetry={noop} onCopy={noop} onRespond={noop} />);
     const rendersAfterMount = finishedRenders;
-    rerender(<Transcript items={[turn('Streaming')]} running onRetry={noop} onCopy={noop} />);
+    rerender(<Transcript items={[turn('Streaming')]} running onRetry={noop} onCopy={noop} onRespond={noop} />);
 
     expect(screen.getByText('Streaming')).toBeTruthy();
     expect(finishedRenders).toBe(rendersAfterMount);

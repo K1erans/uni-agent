@@ -38,6 +38,8 @@ export function registerSidebar(
               return Effect.andThen(threads.connect(post), () => onReady(view));
             case 'prompt':
               return threads.prompt(message.threadId, message.text);
+            case 'permission_response':
+              return threads.respond(message.threadId, message.requestId, message.optionId);
             case 'copy':
               return Effect.tryPromise(async () => vscode.env.clipboard.writeText(message.text)).pipe(
                 Effect.catchAll((error) => Effect.logWarning('Could not copy to the clipboard', error))

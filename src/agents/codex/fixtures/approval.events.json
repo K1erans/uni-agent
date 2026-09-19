@@ -1,0 +1,262 @@
+[
+  {
+    "type": "turn_started",
+    "turnId": "turn-1",
+    "prompt": [
+      {
+        "type": "text",
+        "text": "Create a file called approved.txt containing the word hi, then reply done."
+      }
+    ]
+  },
+  {
+    "type": "session_started",
+    "agent": "codex",
+    "sessionId": "01a0bbbf-479c-7610-8036-06cb89c0bfb6"
+  },
+  {
+    "type": "session_configured",
+    "model": "gpt-6-astra",
+    "permissionMode": "on-request"
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
+      "content": {
+        "type": "text",
+        "text": "I"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
+      "content": {
+        "type": "text",
+        "text": "’ll"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
+      "content": {
+        "type": "text",
+        "text": " create"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
+      "content": {
+        "type": "text",
+        "text": " `"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
+      "content": {
+        "type": "text",
+        "text": "approved"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
+      "content": {
+        "type": "text",
+        "text": ".txt"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
+      "content": {
+        "type": "text",
+        "text": "`"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
+      "content": {
+        "type": "text",
+        "text": " containing"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
+      "content": {
+        "type": "text",
+        "text": " `"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
+      "content": {
+        "type": "text",
+        "text": "hi"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
+      "content": {
+        "type": "text",
+        "text": "`.\n"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "tool_call",
+      "toolCallId": "exec-d90eaec6-a469-44a4-9a18-07e9015936bf",
+      "title": "/bin/zsh -lc 'printf hi > approved.txt'",
+      "kind": "execute",
+      "status": "in_progress",
+      "rawInput": {
+        "command": "/bin/zsh -lc 'printf hi > approved.txt'",
+        "cwd": "/var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-MTxYmg"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "exec-d90eaec6-a469-44a4-9a18-07e9015936bf",
+      "title": "/bin/zsh -lc 'printf hi > approved.txt'",
+      "kind": "execute",
+      "status": "pending",
+      "rawInput": {
+        "command": "/bin/zsh -lc 'printf hi > approved.txt'",
+        "cwd": "/var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-MTxYmg",
+        "reason": "May I create approved.txt containing hi in the current workspace?"
+      }
+    }
+  },
+  {
+    "type": "permission_request",
+    "turnId": "turn-1",
+    "requestId": "permission-1",
+    "toolCall": {
+      "toolCallId": "exec-d90eaec6-a469-44a4-9a18-07e9015936bf",
+      "title": "/bin/zsh -lc 'printf hi > approved.txt'",
+      "kind": "execute",
+      "status": "pending",
+      "rawInput": {
+        "command": "/bin/zsh -lc 'printf hi > approved.txt'",
+        "cwd": "/var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-MTxYmg",
+        "reason": "May I create approved.txt containing hi in the current workspace?"
+      }
+    },
+    "options": [
+      {
+        "optionId": "accept",
+        "name": "Allow once",
+        "kind": "allow_once"
+      },
+      {
+        "optionId": "acceptWithExecpolicyAmendment",
+        "name": "Always allow this command",
+        "kind": "allow_always"
+      },
+      {
+        "optionId": "cancel",
+        "name": "Deny",
+        "kind": "reject_once"
+      }
+    ]
+  },
+  {
+    "type": "permission_resolved",
+    "turnId": "turn-1",
+    "requestId": "permission-1",
+    "outcome": {
+      "outcome": "selected",
+      "optionId": "accept"
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "exec-d90eaec6-a469-44a4-9a18-07e9015936bf",
+      "title": "/bin/zsh -lc 'printf hi > approved.txt'",
+      "kind": "execute",
+      "status": "completed",
+      "rawInput": {
+        "command": "/bin/zsh -lc 'printf hi > approved.txt'",
+        "cwd": "/var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-MTxYmg"
+      },
+      "rawOutput": {
+        "exitCode": 0
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a1679cc87d2bf80ccca630e5e1c",
+      "content": {
+        "type": "text",
+        "text": "done"
+      }
+    }
+  },
+  {
+    "type": "turn_ended",
+    "turnId": "turn-1",
+    "stopReason": "end_turn"
+  }
+]

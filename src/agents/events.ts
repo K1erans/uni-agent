@@ -49,6 +49,20 @@ const toolCallFields = {
 export const ToolCall = Schema.Struct(toolCallFields);
 export type ToolCall = typeof ToolCall.Type;
 
+const toolCallUpdateFields = {
+  toolCallId: Schema.String,
+  title: Schema.optional(Schema.String),
+  kind: Schema.optional(ToolKind),
+  status: Schema.optional(ToolCallStatus),
+  content: toolCallFields.content,
+  rawInput: toolCallFields.rawInput,
+  rawOutput: toolCallFields.rawOutput,
+};
+
+/** What changed about a tool call already shown; fields left out keep the value they had. */
+export const ToolCallUpdate = Schema.Struct(toolCallUpdateFields);
+export type ToolCallUpdate = typeof ToolCallUpdate.Type;
+
 export const PlanEntry = Schema.Struct({
   content: Schema.String,
   priority: Schema.Literal('high', 'medium', 'low'),
@@ -63,20 +77,18 @@ export const PermissionOption = Schema.Struct({
 });
 export type PermissionOption = typeof PermissionOption.Type;
 
+/** How a permission request was answered: with one of its options, or cancelled with its turn. */
+export const PermissionOutcome = Schema.Union(
+  Schema.Struct({ outcome: Schema.Literal('selected'), optionId: Schema.String }),
+  Schema.Struct({ outcome: Schema.Literal('cancelled') })
+);
+export type PermissionOutcome = typeof PermissionOutcome.Type;
+
 export const SessionUpdate = Schema.Union(
   Schema.Struct({ sessionUpdate: Schema.Literal('agent_message_chunk'), messageId: Schema.String, content: ContentBlock }),
   Schema.Struct({ sessionUpdate: Schema.Literal('agent_thought_chunk'), messageId: Schema.String, content: ContentBlock }),
   Schema.Struct({ sessionUpdate: Schema.Literal('tool_call'), ...toolCallFields }),
-  Schema.Struct({
-    sessionUpdate: Schema.Literal('tool_call_update'),
-    toolCallId: Schema.String,
-    title: Schema.optional(Schema.String),
-    kind: Schema.optional(ToolKind),
-    status: Schema.optional(ToolCallStatus),
-    content: toolCallFields.content,
-    rawInput: toolCallFields.rawInput,
-    rawOutput: toolCallFields.rawOutput,
-  }),
+  Schema.Struct({ sessionUpdate: Schema.Literal('tool_call_update'), ...toolCallUpdateFields }),
   // Replaces the whole plan; entries not present are dropped.
   Schema.Struct({ sessionUpdate: Schema.Literal('plan'), entries: Schema.Array(PlanEntry) })
 );
@@ -112,6 +124,8 @@ export const AgentEvent = Schema.Union(
     toolCall: ToolCall,
     options: Schema.Array(PermissionOption),
   }),
+  // Every permission request is resolved exactly once, at the latest before its turn ends.
+  Schema.Struct({ type: Schema.Literal('permission_resolved'), turnId: Schema.String, requestId: Schema.String, outcome: PermissionOutcome }),
   Schema.Struct({ type: Schema.Literal('turn_ended'), turnId: Schema.String, stopReason: StopReason }),
   Schema.Struct({
     type: Schema.Literal('error'),

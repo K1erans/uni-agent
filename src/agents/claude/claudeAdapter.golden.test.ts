@@ -2,6 +2,8 @@ import * as path from 'node:path';
 import { Effect, Layer, Option } from 'effect';
 import { describe, expect, it } from 'vitest';
 import { Ids } from '../../ids';
+import { allowOnce, recordingSink, type Answer } from '../../testing/eventSink';
+import { APPROVAL_PROMPT, TOOL_CALL_PROMPT } from '../../testing/prompts';
 import type { AgentEvent } from '../events';
 import { Executables } from '../findExecutable';
 import { readTraffic, type TrafficLine } from '../traffic';
@@ -14,7 +16,7 @@ import { recordedSessionIds, replayQuery } from './claudeTraffic';
  */
 const FIXTURES = path.join(__dirname, 'fixtures');
 
-async function replay(name: string, prompt: string): Promise<AgentEvent[]> {
+async function replay(name: string, prompt: string, answer: Answer = allowOnce): Promise<AgentEvent[]> {
   const traffic = Effect.runSync(readTraffic(path.join(FIXTURES, `${name}.ndjson`)));
   const ids = [recordedSessionId(traffic), 'turn-1'];
   const events: AgentEvent[] = [];
@@ -25,10 +27,11 @@ async function replay(name: string, prompt: string): Promise<AgentEvent[]> {
   );
   await Effect.runPromise(
     Effect.gen(function* () {
-      const adapter = yield* ClaudeAdapter.make({
+      let adapter: ClaudeAdapter | undefined;
+      adapter = yield* ClaudeAdapter.make({
         cwd: '/workspace',
         executablePath: Option.none(),
-        onEvent: (event) => Effect.sync(() => events.push(event)),
+        onEvent: recordingSink(events, answer, () => adapter),
       });
       yield* adapter.prompt([{ type: 'text', text: prompt }]);
     }).pipe(Effect.scoped, Effect.provide(services))
@@ -45,13 +48,13 @@ function recordedSessionId(traffic: TrafficLine[]): string {
 }
 
 describe('Claude adapter golden fixtures', () => {
-  it('streaming-text', async () => {
-    const events = await replay('streaming-text', 'Count from 1 to 5, one number per line. Reply with nothing else.');
-    await expect(JSON.stringify(events, null, 2) + '\n').toMatchFileSnapshot('./fixtures/streaming-text.events.json');
-  });
-
-  it('not-signed-in', async () => {
-    const events = await replay('not-signed-in', 'Say hello.');
-    await expect(JSON.stringify(events, null, 2) + '\n').toMatchFileSnapshot('./fixtures/not-signed-in.events.json');
+  it.each([
+    ['streaming-text', 'Count from 1 to 5, one number per line. Reply with nothing else.'],
+    ['tool-call', TOOL_CALL_PROMPT],
+    ['approval', APPROVAL_PROMPT],
+    ['not-signed-in', 'Say hello.'],
+  ])('%s', async (name, prompt) => {
+    const events = await replay(name, prompt);
+    await expect(JSON.stringify(events, null, 2) + '\n').toMatchFileSnapshot(`./fixtures/${name}.events.json`);
   });
 });

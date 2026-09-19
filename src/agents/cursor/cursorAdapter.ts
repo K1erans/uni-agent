@@ -1,12 +1,12 @@
 import { Effect, Option, Schema, type Deferred, type Scope } from 'effect';
 import { Ids } from '../../ids';
 import { notSignedInMessage, type AdapterOptions } from '../adapter';
-import { ContentBlock, StopReason } from '../events';
+import { ContentBlock, PermissionOption, StopReason, ToolCallStatus, ToolKind, type ToolCall, type ToolCallContent } from '../events';
 import { Executables } from '../findExecutable';
 import { decodeMessage, type JsonRpcConnection, type MalformedMessage, type RpcError } from '../jsonRpc';
 import { AgentFailure, CLIENT_INFO, JsonRpcAdapter, type OpenedSession, type TurnError } from '../jsonRpcAdapter';
 import { Stdio } from '../stdio';
-import type { WireMessage } from '../traffic';
+import { WireMessage } from '../traffic';
 import { Turn, type ChunkKind } from '../turn';
 
 // The parts of the Agent Client Protocol (https://agentclientprotocol.com) the adapter reads.
@@ -34,16 +34,43 @@ const SessionCreated = Schema.Struct({ sessionId: Schema.String, ...SessionOpene
 
 const PromptResult = Schema.Struct({ stopReason: StopReason });
 
+/**
+ * A tool call as ACP describes it. Its fields are the normalised model's own, except that content
+ * blocks are read loosely: an agent may send kinds (images, terminals) the thread cannot show yet,
+ * and one of those must not break the session.
+ */
+const AcpToolCall = Schema.Struct({
+  toolCallId: Schema.String,
+  kind: Schema.optional(Schema.String),
+  status: Schema.optional(Schema.String),
+  content: Schema.optional(Schema.Array(WireMessage)),
+  rawInput: Schema.optional(WireMessage),
+  rawOutput: Schema.optional(WireMessage),
+});
+type AcpToolCall = typeof AcpToolCall.Type;
+
 const SessionUpdate = Schema.Struct({
   sessionId: Schema.String,
   update: Schema.Union(
     Schema.Struct({ sessionUpdate: Schema.Literal('agent_message_chunk', 'agent_thought_chunk'), content: ContentBlock }).pipe(
-      Schema.attachPropertySignature('kind', 'text')
+      Schema.attachPropertySignature('variant', 'text')
     ),
-    // Tool calls, plans, non-text content and the agent's own updates (commands, titles) arrive
-    // with later tickets.
-    Schema.Struct({ sessionUpdate: Schema.String }).pipe(Schema.attachPropertySignature('kind', 'other'))
+    Schema.Struct({ sessionUpdate: Schema.Literal('tool_call'), title: Schema.String, ...AcpToolCall.fields }).pipe(
+      Schema.attachPropertySignature('variant', 'toolCall')
+    ),
+    Schema.Struct({ sessionUpdate: Schema.Literal('tool_call_update'), title: Schema.optional(Schema.String), ...AcpToolCall.fields }).pipe(
+      Schema.attachPropertySignature('variant', 'toolCallUpdate')
+    ),
+    // Plans and the agent's own updates (commands, session titles) arrive with later tickets.
+    Schema.Struct({ sessionUpdate: Schema.String }).pipe(Schema.attachPropertySignature('variant', 'other'))
   ),
+});
+
+/** What the agent asks permission for: the tool call it is about and the answers it offers. */
+const RequestPermission = Schema.Struct({
+  sessionId: Schema.String,
+  toolCall: Schema.Struct({ title: Schema.optional(Schema.String), ...AcpToolCall.fields }),
+  options: Schema.Array(Schema.Struct({ optionId: Schema.String, name: Schema.String, kind: Schema.String })),
 });
 
 class CursorTurn extends Turn {
@@ -133,12 +160,113 @@ export class CursorAdapter extends JsonRpcAdapter<CursorTurn> {
       if (!turn || this.loading || sessionId !== this.sessionId) {
         return Effect.void;
       }
-      if (update.kind === 'other') {
-        return Effect.logDebug(`Skipped a Cursor ${update.sessionUpdate} update`);
+      switch (update.variant) {
+        case 'text':
+          return turn.chunk(update.sessionUpdate, turn.messageId(update.sessionUpdate), update.content.text);
+        case 'toolCall':
+          return turn.toolCall(toolCallOf(update.title, update));
+        case 'toolCallUpdate':
+          // ACP sends the tool call itself first; an update for one the thread never saw is skipped.
+          return turn.hasToolCall(update.toolCallId)
+            ? turn.updateToolCall({
+                toolCallId: update.toolCallId,
+                title: update.title,
+                kind: kindOf(update.kind),
+                status: statusOf(update.status),
+                content: contentOf(update.content),
+                rawInput: update.rawInput,
+                rawOutput: update.rawOutput,
+              })
+            : Effect.logDebug(`Skipped a Cursor update for unknown tool call ${update.toolCallId}`);
+        case 'other':
+          return Effect.logDebug(`Skipped a Cursor ${update.sessionUpdate} update`);
       }
-      return turn.chunk(update.sessionUpdate, turn.messageId(update.sessionUpdate), update.content.text);
     });
   }
+
+  /**
+   * ACP's own way of asking permission: the agent's request waits until the user answers, on a
+   * fiber of the connection's so the session's other traffic keeps flowing. A request for another
+   * session, or one arriving outside a turn, is answered as cancelled.
+   */
+  protected handleRequest(method: string, params: WireMessage | undefined): Effect.Effect<Option.Option<Effect.Effect<WireMessage>>, MalformedMessage> {
+    if (method !== 'session/request_permission') {
+      return Effect.succeedNone;
+    }
+    return Effect.map(decodeMessage(RequestPermission, params, `${method} request`), ({ sessionId, toolCall, options }) =>
+      Option.some(
+        Effect.suspend(() => {
+          const turn = this.turn;
+          const offered = permissionOptions(options);
+          if (!turn || sessionId !== this.sessionId || offered.length === 0) {
+            return Effect.succeed(CANCELLED);
+          }
+          const call = toolCallOf(toolCall.title ?? 'Tool call', toolCall);
+          return Effect.zipRight(
+            turn.toolCall({ ...call, status: 'pending' }),
+            Effect.map(this.approvals.ask(turn.id, { ...call, status: 'pending' }, offered), (outcome): WireMessage => ({ outcome: { ...outcome } }))
+          );
+        })
+      )
+    );
+  }
+}
+
+/** ACP's answer for a request nobody can answer any more. */
+const CANCELLED: WireMessage = { outcome: { outcome: 'cancelled' } };
+
+const isToolKind = Schema.is(ToolKind);
+const isToolCallStatus = Schema.is(ToolCallStatus);
+const isPermissionOptionKind = Schema.is(PermissionOption.fields.kind);
+const isTextContent = Schema.is(Schema.Struct({ type: Schema.Literal('content'), content: ContentBlock }));
+const isDiffContent = Schema.is(
+  Schema.Struct({
+    type: Schema.Literal('diff'),
+    path: Schema.String,
+    oldText: Schema.optional(Schema.NullOr(Schema.String)),
+    newText: Schema.String,
+  })
+);
+
+/** A tool call as ACP sent it; a kind or status this build does not know falls back to the model's own default. */
+function toolCallOf(title: string, call: AcpToolCall): ToolCall {
+  return {
+    toolCallId: call.toolCallId,
+    title,
+    kind: kindOf(call.kind) ?? 'other',
+    status: statusOf(call.status) ?? 'pending',
+    content: contentOf(call.content),
+    rawInput: call.rawInput,
+    rawOutput: call.rawOutput,
+  };
+}
+
+function kindOf(kind: string | undefined): ToolKind | undefined {
+  return kind !== undefined && isToolKind(kind) ? kind : undefined;
+}
+
+function statusOf(status: string | undefined): ToolCallStatus | undefined {
+  return status !== undefined && isToolCallStatus(status) ? status : undefined;
+}
+
+/** Tool call content the thread can show; blocks of other kinds (images, terminals) are left out. */
+function contentOf(content: ReadonlyArray<WireMessage> | undefined): ToolCallContent[] | undefined {
+  return content?.flatMap((block): ToolCallContent[] => {
+    if (isTextContent(block)) {
+      return [{ type: 'content', content: block.content }];
+    }
+    if (isDiffContent(block)) {
+      return [{ type: 'diff', path: block.path, oldText: block.oldText ?? null, newText: block.newText }];
+    }
+    return [];
+  });
+}
+
+/** The answers the card offers; an option of a kind this build does not know is left out. */
+function permissionOptions(options: typeof RequestPermission.Type.options): PermissionOption[] {
+  return options.flatMap((option) =>
+    isPermissionOptionKind(option.kind) ? [{ optionId: option.optionId, name: option.name, kind: option.kind }] : []
+  );
 }
 
 function opened(sessionId: string, { models, modes }: typeof SessionOpened.Type): OpenedSession {

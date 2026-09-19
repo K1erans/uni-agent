@@ -1,5 +1,6 @@
 import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { APPROVAL_PROMPT, TOOL_CALL_PROMPT } from '../../testing/prompts';
 import { replayFixture } from '../../testing/stdioFixtures';
 import { CodexAdapter } from './codexAdapter';
 
@@ -12,6 +13,8 @@ const FIXTURES = path.join(__dirname, 'fixtures');
 describe('Codex adapter golden fixtures', () => {
   it.each([
     ['streaming-text', 'Count from 1 to 5, one number per line. Reply with nothing else.'],
+    ['tool-call', TOOL_CALL_PROMPT],
+    ['approval', APPROVAL_PROMPT],
     ['not-signed-in', 'Say hello.'],
   ])('%s', async (name, prompt) => {
     const events = await replayFixture(CodexAdapter.make, path.join(FIXTURES, `${name}.ndjson`), prompt);

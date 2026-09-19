@@ -1,13 +1,14 @@
 import { Effect, Option, Predicate, Schema, type Deferred, type Scope } from 'effect';
 import { Ids } from '../../ids';
 import { notSignedInMessage, type AdapterOptions } from '../adapter';
-import type { AgentErrorCode, ContentBlock, StopReason } from '../events';
+import type { AgentErrorCode, ContentBlock, StopReason, ToolCall } from '../events';
 import { Executables } from '../findExecutable';
 import { decodeMessage, type JsonRpcConnection, type MalformedMessage } from '../jsonRpc';
 import { AgentFailure, CLIENT_INFO, JsonRpcAdapter, type OpenedSession, type TurnError } from '../jsonRpcAdapter';
 import { Stdio } from '../stdio';
 import { WireMessage } from '../traffic';
 import { Turn, type ChunkKind } from '../turn';
+import { AvailableDecisions, CODEX_CANCELLED, codexApproval, ThreadItem, toolCallOf, type CodexApproval, type ItemLifecycle } from './codexItems';
 
 // The parts of Codex's app-server protocol the adapter reads (`codex app-server generate-ts`).
 
@@ -34,19 +35,7 @@ const Delta = Schema.Struct({ threadId: Schema.String, itemId: Schema.String, de
 
 const SummaryDelta = Schema.Struct({ ...Delta.fields, summaryIndex: Schema.Number });
 
-const ItemCompleted = Schema.Struct({
-  threadId: Schema.String,
-  item: Schema.Union(
-    Schema.Struct({ type: Schema.Literal('agentMessage'), id: Schema.String, text: Schema.String }).pipe(
-      Schema.attachPropertySignature('kind', 'message')
-    ),
-    Schema.Struct({ type: Schema.Literal('reasoning'), id: Schema.String, summary: Schema.Array(Schema.String) }).pipe(
-      Schema.attachPropertySignature('kind', 'reasoning')
-    ),
-    // Tool calls, file changes and the like arrive with later tickets.
-    Schema.Struct({ type: Schema.String }).pipe(Schema.attachPropertySignature('kind', 'other'))
-  ),
-});
+const ItemNews = Schema.Struct({ threadId: Schema.String, item: ThreadItem });
 
 const ErrorNotification = Schema.Struct({ threadId: Schema.String, error: TurnFailure, willRetry: Schema.Boolean });
 
@@ -59,10 +48,32 @@ const TurnCompleted = Schema.Struct({
 export const CODEX_NOTIFICATIONS: ReadonlySet<string> = new Set([
   'item/agentMessage/delta',
   'item/reasoning/summaryTextDelta',
+  'item/started',
   'item/completed',
   'error',
   'turn/completed',
 ]);
+
+/** The approval requests the adapter answers; the option IDs are the decisions Codex expects back. */
+const COMMAND_APPROVAL = 'item/commandExecution/requestApproval';
+const FILE_CHANGE_APPROVAL = 'item/fileChange/requestApproval';
+
+const CommandApproval = Schema.Struct({
+  itemId: Schema.String,
+  availableDecisions: AvailableDecisions,
+  command: Schema.optional(Schema.NullOr(Schema.String)),
+  cwd: Schema.optional(Schema.NullOr(Schema.String)),
+  reason: Schema.optional(Schema.NullOr(Schema.String)),
+  // Set when Codex is asking to reach the network rather than only to run the command.
+  networkApprovalContext: Schema.optional(Schema.NullOr(Schema.Struct({ host: Schema.String }))),
+});
+
+const FileChangeApproval = Schema.Struct({
+  itemId: Schema.String,
+  availableDecisions: AvailableDecisions,
+  reason: Schema.optional(Schema.NullOr(Schema.String)),
+  grantRoot: Schema.optional(Schema.NullOr(Schema.String)),
+});
 
 class CodexTurn extends Turn {
   /** Codex's own ID for the turn, known once `turn/start` answers; `turn/interrupt` needs it. */
@@ -167,8 +178,10 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
         return decode(Delta, ({ itemId, delta }) => turn.stream('agent_message_chunk', itemId, delta));
       case 'item/reasoning/summaryTextDelta':
         return decode(SummaryDelta, ({ itemId, summaryIndex, delta }) => turn.stream('agent_thought_chunk', `${itemId}:${summaryIndex}`, delta));
+      case 'item/started':
+        return decode(ItemNews, ({ item }) => this.showToolCall(turn, item, 'started'));
       case 'item/completed':
-        return decode(ItemCompleted, ({ item }) => {
+        return decode(ItemNews, ({ item }) => {
           switch (item.kind) {
             case 'message':
               return turn.complete('agent_message_chunk', item.id, item.text);
@@ -176,8 +189,8 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
               return Effect.forEach(item.summary, (text, index) => turn.complete('agent_thought_chunk', `${item.id}:${index}`, text), {
                 discard: true,
               });
-            case 'other':
-              return Effect.void;
+            default:
+              return this.showToolCall(turn, item, 'completed');
           }
         });
       case 'error':
@@ -193,6 +206,78 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
         return Effect.void;
     }
   }
+
+  /**
+   * Codex asks about a command or a file change with a request of its own, which is answered once
+   * the user has chosen. The answer is awaited on a fiber of the connection's, so the turn's other
+   * traffic keeps flowing while the card waits.
+   */
+  protected handleRequest(method: string, params: WireMessage | undefined): Effect.Effect<Option.Option<Effect.Effect<WireMessage>>, MalformedMessage> {
+    switch (method) {
+      case COMMAND_APPROVAL:
+        return Effect.map(decodeMessage(CommandApproval, params, `${method} request`), (request) =>
+          Option.some(
+            this.askApproval(
+              {
+                toolCallId: request.itemId,
+                title: commandApprovalTitle(request),
+                kind: request.networkApprovalContext ? 'fetch' : 'execute',
+                status: 'pending',
+                rawInput: { command: request.command ?? null, cwd: request.cwd ?? null, reason: request.reason ?? null },
+              },
+              codexApproval(request.availableDecisions)
+            )
+          )
+        );
+      case FILE_CHANGE_APPROVAL:
+        return Effect.map(decodeMessage(FileChangeApproval, params, `${method} request`), (request) =>
+          Option.some(
+            this.askApproval(
+              {
+                toolCallId: request.itemId,
+                title: request.grantRoot ? `Write files under ${request.grantRoot}` : 'Apply file changes',
+                kind: 'edit',
+                status: 'pending',
+                rawInput: { reason: request.reason ?? null, grantRoot: request.grantRoot ?? null },
+              },
+              codexApproval(request.availableDecisions)
+            )
+          )
+        );
+      default:
+        return Effect.succeedNone;
+    }
+  }
+
+  /** Asks the user about `toolCall` and answers Codex with the decision behind the option they chose. */
+  private askApproval(toolCall: ToolCall, approval: CodexApproval): Effect.Effect<WireMessage> {
+    return Effect.suspend(() => {
+      const turn = this.turn;
+      if (!turn) {
+        return Effect.succeed({ decision: CODEX_CANCELLED });
+      }
+      return Effect.zipRight(
+        // The card and the item Codex started are the same tool call, so the ask updates it.
+        turn.toolCall(toolCall),
+        Effect.map(this.approvals.ask(turn.id, toolCall, approval.options), (outcome) => ({
+          decision: (outcome.outcome === 'selected' ? approval.decisions.get(outcome.optionId) : undefined) ?? CODEX_CANCELLED,
+        }))
+      );
+    });
+  }
+
+  private showToolCall(turn: CodexTurn, item: ThreadItem, lifecycle: ItemLifecycle): Effect.Effect<void> {
+    const toolCall = toolCallOf(item, lifecycle);
+    return toolCall ? turn.toolCall(toolCall) : Effect.void;
+  }
+}
+
+/** What a command approval is about: reaching a host, or running the command Codex wants to run. */
+function commandApprovalTitle(request: typeof CommandApproval.Type): string {
+  if (request.networkApprovalContext) {
+    return `Allow network access to ${request.networkApprovalContext.host}`;
+  }
+  return request.command ?? 'Run a command';
 }
 
 function stopReasonOf(status: string): StopReason {

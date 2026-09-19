@@ -17,7 +17,7 @@ import { outputChannelLogger } from './logger';
 import { MIN_VSCODE_VERSION, nodeSqliteAvailable } from './nodeSqlite';
 import { readSetting } from './settings';
 import { registerSidebar, SIDEBAR_VIEW_ID } from './sidebar';
-import type { Workspace } from './thread';
+import type { Thread, Workspace } from './thread';
 import { makeThreads, type Threads } from './threads';
 
 const COMMANDS = [
@@ -70,9 +70,17 @@ function startServices(
     yield* Effect.logInfo('Uni Agent activated');
 
     const run = Runtime.runFork(yield* Effect.runtime<never>());
-    const threads = yield* makeThreads(currentWorkspace, makeAdapter);
+    // The sidebar shows one thread at a time, so its badge counts the others waiting for an answer.
+    let sidebar: vscode.WebviewView | undefined;
+    // VS Code disposes the view whenever the sidebar is hidden, and a disposed one refuses a badge.
+    const showWaiting = (): Effect.Effect<void> => Effect.ignore(Effect.try(() => badgeWaiting(sidebar, threads)));
+    const threads: Threads = yield* makeThreads(currentWorkspace, makeAdapter, showWaiting);
     const webviewReady = yield* disposable(() => new vscode.EventEmitter<vscode.WebviewView>());
-    yield* registerSidebar(extensionUri, threads, (view) => webviewReady.fire(view));
+    yield* registerSidebar(extensionUri, threads, (view) => {
+      sidebar = view;
+      badgeWaiting(view, threads);
+      webviewReady.fire(view);
+    });
 
     const commands = {
       'uniAgent.newThread': () => run(Effect.zipRight(threads.create(), revealSidebar)),
@@ -93,13 +101,22 @@ type Services = ClaudeSdk | Stdio | Executables | Ids | Branches;
 
 const revealSidebar = Effect.promise(async () => vscode.commands.executeCommand(`${SIDEBAR_VIEW_ID}.focus`));
 
+/** Counts the threads waiting for the user to answer a permission request on the sidebar's icon. */
+function badgeWaiting(view: vscode.WebviewView | undefined, threads: Threads): void {
+  if (!view) {
+    return;
+  }
+  const waiting = threads.list().filter((thread) => thread.needsApproval).length;
+  view.badge = waiting === 0 ? undefined : { value: waiting, tooltip: waiting === 1 ? '1 thread needs approval' : `${waiting} threads need approval` };
+}
+
 /** Lets the user switch the sidebar to another of this window's threads. */
 function pickThread(threads: Threads): Effect.Effect<void> {
   return Effect.gen(function* () {
     const current = threads.current;
     const items = threads.list().map((thread) => ({
       label: thread.title ?? 'New thread',
-      description: thread === current ? 'Current' : undefined,
+      description: threadNote(thread, thread === current),
       detail: `${AGENT_NAMES[thread.info.agent]} · ${thread.workspace.name ?? 'No folder open'}`,
       threadId: thread.info.id,
     }));
@@ -111,6 +128,12 @@ function pickThread(threads: Threads): Effect.Effect<void> {
       yield* revealSidebar;
     }
   });
+}
+
+/** What the thread list says about a thread beyond its title: whether it is waiting, and whether it is shown. */
+function threadNote(thread: Thread, current: boolean): string | undefined {
+  const notes = [...(thread.needsApproval ? ['$(shield) Needs approval'] : []), ...(current ? ['Current'] : [])];
+  return notes.length > 0 ? notes.join(' · ') : undefined;
 }
 
 /** Starts a thread with the agent the user picks; a stand-in until the agent picker lands. */
