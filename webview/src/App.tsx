@@ -22,6 +22,7 @@ export function App({ post }: { post: (message: WebviewMessage) => void }) {
   const send = () => {
     if (canSend) {
       post({ type: 'prompt', text: draft });
+      dispatch({ type: 'prompt_sent' });
       setDraft('');
     }
   };
