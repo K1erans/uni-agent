@@ -9,14 +9,29 @@ export type TranscriptItem =
 
 export interface ThreadState {
   items: TranscriptItem[];
-  /** A turn is in progress, so the composer cannot send. */
+  /** A turn is in progress or a prompt is on its way to start one, so the composer cannot send. */
   running: boolean;
 }
 
 export const emptyThread: ThreadState = { items: [], running: false };
 
-export function threadReducer(state: ThreadState, message: ExtensionMessage): ThreadState {
-  return message.type === 'history' ? message.events.reduce(applyEvent, emptyThread) : applyEvent(state, message.event);
+/**
+ * What changes the thread: a message from the extension, or the composer having posted a prompt.
+ * The extension ignores prompts while a turn runs, and it counts the turn as running from the moment
+ * it accepts the prompt, before `turn_started` arrives. So the webview stops sending from the moment
+ * it posts; `turn_started` and then `turn_ended` always follow an accepted prompt.
+ */
+export type ThreadAction = ExtensionMessage | { type: 'prompt_sent' };
+
+export function threadReducer(state: ThreadState, action: ThreadAction): ThreadState {
+  switch (action.type) {
+    case 'history':
+      return action.events.reduce(applyEvent, emptyThread);
+    case 'event':
+      return applyEvent(state, action.event);
+    case 'prompt_sent':
+      return { ...state, running: true };
+  }
 }
 
 /**

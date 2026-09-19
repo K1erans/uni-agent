@@ -48,6 +48,24 @@ describe('App', () => {
     expect(document.querySelector<VscodeTextarea>('vscode-textarea')!.value).toBe('');
   });
 
+  it('blocks sending from the moment a prompt is posted, before the turn starts', () => {
+    const post = vi.fn();
+    render(<App post={post} />);
+
+    type('First');
+    fireEvent.click(sendButton());
+    type('Second');
+
+    expect(sendButton().disabled).toBe(true);
+    fireEvent.click(sendButton());
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(document.querySelector<VscodeTextarea>('vscode-textarea')!.value).toBe('Second');
+
+    receive({ type: 'event', event: { type: 'turn_started', turnId: 't1', prompt: [{ type: 'text', text: 'First' }] } });
+    receive({ type: 'event', event: { type: 'turn_ended', turnId: 't1', stopReason: 'end_turn' } });
+    expect(sendButton().disabled).toBe(false);
+  });
+
   it('streams the reply in and blocks sending until the turn ends', () => {
     render(<App post={() => {}} />);
 
