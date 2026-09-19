@@ -141,14 +141,17 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
     return new ClaudeTurn(id, ended, this.options.onEvent);
   }
 
-  protected runTurn(_turn: ClaudeTurn, executable: string, prompt: ReadonlyArray<ContentBlock>): Effect.Effect<void> {
+  protected runTurn(turn: ClaudeTurn, executable: string, prompt: ReadonlyArray<ContentBlock>): Effect.Effect<void> {
     return Effect.flatMap(this.connect(executable), (connection) =>
-      connection.send({
-        type: 'user',
-        message: { role: 'user', content: prompt.map((block) => ({ type: 'text', text: block.text })) },
-        parent_tool_use_id: null,
-        origin: { kind: 'human' },
-      })
+      // A cancel that arrived before Claude started had nothing to interrupt, so the prompt is never sent.
+      turn.cancelRequested
+        ? this.endTurn(turn, 'cancelled')
+        : connection.send({
+            type: 'user',
+            message: { role: 'user', content: prompt.map((block) => ({ type: 'text', text: block.text })) },
+            parent_tool_use_id: null,
+            origin: { kind: 'human' },
+          })
     );
   }
 
