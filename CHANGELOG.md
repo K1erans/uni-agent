@@ -4,6 +4,18 @@
 
 ### Added
 
+- Tool calls in the thread: each one a collapsible item with its input, its output and its status
+  (waiting, running, done, failed), for Claude, Codex and Cursor alike.
+- Command approvals: when an agent asks permission, the thread shows an inline card on the tool
+  call with the answers the agent offers, and the answer goes back through the agent's own
+  mechanism — Claude's `canUseTool` callback, Codex's approval requests, ACP
+  `session/request_permission`. Stopping the turn or closing the thread answers every open
+  request as cancelled, so no agent is left waiting.
+- A thread waiting for an answer is flagged in its heading and in **Thread History**, and the
+  sidebar's icon carries a badge counting the threads waiting.
+- Golden fixtures for a tool-call sequence and an approval round-trip per agent, recorded from
+  the real CLIs by `npm run test:live`.
+
 - Codex threads: `codex app-server` over JSON-RPC stdio, streaming agent messages and reasoning
   summaries through Codex's started → delta → completed item lifecycle. Signed-out Codex is
   detected up front with `account/read`.

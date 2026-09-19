@@ -6,7 +6,9 @@ export const WebviewMessage = Schema.Union(
   Schema.Struct({ type: Schema.Literal('ready') }),
   // Names the thread the webview was showing, so a prompt never lands in a thread switched to since.
   Schema.Struct({ type: Schema.Literal('prompt'), threadId: Schema.String, text: Schema.String }),
-  Schema.Struct({ type: Schema.Literal('copy'), text: Schema.String })
+  Schema.Struct({ type: Schema.Literal('copy'), text: Schema.String }),
+  // The user's answer to a permission request: the ID of the option they chose.
+  Schema.Struct({ type: Schema.Literal('permission_response'), threadId: Schema.String, requestId: Schema.String, optionId: Schema.String })
 );
 export type WebviewMessage = typeof WebviewMessage.Type;
 

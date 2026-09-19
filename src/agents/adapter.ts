@@ -12,8 +12,11 @@ export interface AgentAdapter {
   /** Runs one prompt turn; succeeds with why the turn ended. */
   prompt(prompt: ReadonlyArray<ContentBlock>): Effect.Effect<StopReason, TurnInProgress>;
 
-  /** Asks the agent to stop the running turn, which then ends as `cancelled`. */
+  /** Asks the agent to stop the running turn, which then ends as `cancelled`. Pending permission requests are cancelled. */
   cancel(): Effect.Effect<void>;
+
+  /** Answers an open permission request with the option the user chose. */
+  respond(requestId: string, optionId: string): Effect.Effect<void, UnknownPermissionRequest>;
 }
 
 /** Receives every event an adapter emits, in order. */
@@ -47,6 +50,12 @@ export function binaryMissingMessage(agent: AgentKind, command: string, executab
     onNone: () => `${name} ("${command}") was not found on PATH. Install ${name}, or set ${setting} to its location.`,
   });
 }
+
+/** An answer named a permission request that is not open (unknown, or already answered) or an option it does not offer. */
+export class UnknownPermissionRequest extends Data.TaggedError('UnknownPermissionRequest')<{
+  readonly requestId: string;
+  readonly optionId: string;
+}> {}
 
 /** Explains that an agent's CLI is not signed in; `login` is the command that signs it in. */
 export function notSignedInMessage(agent: AgentKind, login: string, detail = ''): string {

@@ -24,8 +24,13 @@ export function decodeMessage<A, I>(schema: Schema.Schema<A, I>, value: WireMess
 export interface JsonRpcHandlers {
   /** Handles a notification. Failing ends the connection. */
   readonly notification: (method: string, params: WireMessage | undefined) => Effect.Effect<void, MalformedMessage>;
-  /** Answers a request from the agent; none replies "method not found". Failing ends the connection. */
-  readonly request: (method: string, params: WireMessage | undefined) => Effect.Effect<Option.Option<WireMessage>, MalformedMessage>;
+  /**
+   * Answers a request from the agent; none replies "method not found". The answer is an effect of
+   * its own, run on a fiber of the connection's, so an answer the user has to give (a permission
+   * request) does not hold up the messages behind it. Failing to read the request ends the
+   * connection.
+   */
+  readonly request: (method: string, params: WireMessage | undefined) => Effect.Effect<Option.Option<Effect.Effect<WireMessage>>, MalformedMessage>;
 }
 
 const METHOD_NOT_FOUND = -32601;
@@ -64,13 +69,15 @@ export class JsonRpcConnection {
   private constructor(
     private readonly process: StdioProcess,
     private readonly handlers: JsonRpcHandlers,
-    private readonly closed: Deferred.Deferred<string>
+    private readonly closed: Deferred.Deferred<string>,
+    /** Where answers that are not ready yet are awaited; closing it stops waiting for them. */
+    private readonly scope: Scope.Scope
   ) {}
 
   /** Starts reading the process's messages. Closing the scope stops reading and fails pending requests. */
   static open(process: StdioProcess, handlers: JsonRpcHandlers): Effect.Effect<JsonRpcConnection, never, Scope.Scope> {
     return Effect.gen(function* () {
-      const connection = new JsonRpcConnection(process, handlers, yield* Deferred.make<string>());
+      const connection = new JsonRpcConnection(process, handlers, yield* Deferred.make<string>(), yield* Effect.scope);
       yield* Effect.addFinalizer(() => connection.close('the connection was closed'));
       yield* Effect.forkScoped(connection.read());
       return connection;
@@ -141,7 +148,7 @@ export class JsonRpcConnection {
         return Effect.flatMap(
           this.handlers.request(message.method, message.params),
           Option.match({
-            onSome: (result) => this.send({ jsonrpc: '2.0', id: message.id, result }),
+            onSome: (answer) => Effect.asVoid(Effect.forkIn(Effect.flatMap(answer, (result) => this.send({ jsonrpc: '2.0', id: message.id, result })), this.scope)),
             onNone: () =>
               Effect.zipRight(
                 Effect.logDebug(`Declined an unsupported request from the agent: ${message.method}`),

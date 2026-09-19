@@ -1,11 +1,12 @@
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import { Effect, Either, Exit, Layer, Option, Scope } from 'effect';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Ids } from '../../ids';
-import { TurnInProgress } from '../adapter';
+import { recordingSink, type Answer } from '../../testing/eventSink';
+import { TurnInProgress, UnknownPermissionRequest } from '../adapter';
 import type { AgentEvent } from '../events';
 import { Executables } from '../findExecutable';
-import type { TrafficLine } from '../traffic';
+import type { TrafficLine, WireMessage } from '../traffic';
 import { ClaudeAdapter, ClaudeSdk } from './claudeAdapter';
 import { replayQuery } from './claudeTraffic';
 
@@ -39,6 +40,33 @@ function assistant(id: string, text: string) {
   return { type: 'assistant', parent_tool_use_id: null, message: { id, content: [{ type: 'text', text }] } };
 }
 
+function toolUse(messageId: string, toolUseId: string, name: string, input: WireMessage) {
+  return { type: 'assistant', parent_tool_use_id: null, message: { id: messageId, content: [{ type: 'tool_use', id: toolUseId, name, input }] } };
+}
+
+function toolResult(toolUseId: string, content: WireMessage, isError = false) {
+  return {
+    type: 'user',
+    parent_tool_use_id: null,
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content, is_error: isError }] },
+  };
+}
+
+/** Claude asking permission for a tool, and the answer the adapter is expected to send back. */
+const asks = (requestId: string, name: string, input: WireMessage, extra: { readonly [key: string]: WireMessage } = {}): TrafficLine => ({
+  dir: 'recv',
+  data: {
+    type: 'control_request',
+    request_id: requestId,
+    request: { subtype: 'can_use_tool', tool_name: name, input, options: { toolUseID: 'toolu_1', requestId, ...extra } },
+  },
+});
+
+const answers = (requestId: string, response: WireMessage): TrafficLine => ({
+  dir: 'send',
+  data: { type: 'control_response', response: { subtype: 'success', request_id: requestId, response } },
+});
+
 function result(fields: { is_error?: boolean; result?: string } = {}) {
   return { type: 'result', subtype: 'success', is_error: false, result: '', stop_reason: 'end_turn', ...fields };
 }
@@ -47,13 +75,18 @@ interface SetupOptions {
   executablePath?: Option.Option<string>;
   /** Resolves `claude` given the configured override; defaults to finding it. */
   findClaude?: (override: Option.Option<string>) => Option.Option<string>;
+  /** How the user answers a permission request; no answer leaves the request open. */
+  answer?: Answer;
 }
 
 /**
  * Builds an adapter over a fake agent, in a scope the test can close, capturing the events it emits
  * and the options it starts Claude with.
  */
-function setup(traffic: TrafficLine[][], { executablePath = Option.none(), findClaude = () => Option.some('/usr/local/bin/claude') }: SetupOptions = {}) {
+function setup(
+  traffic: TrafficLine[][],
+  { executablePath = Option.none(), findClaude = () => Option.some('/usr/local/bin/claude'), answer }: SetupOptions = {}
+) {
   const events: AgentEvent[] = [];
   const started: Options[] = [];
   const sessions = [...traffic];
@@ -69,16 +102,27 @@ function setup(traffic: TrafficLine[][], { executablePath = Option.none(), findC
     Layer.succeed(Ids, { next: Effect.sync(() => (id++ === 0 ? SESSION_ID : `turn-${id - 1}`)) })
   );
   const scope = Effect.runSync(Scope.make());
-  const adapter = Effect.runSync(
-    ClaudeAdapter.make({ cwd: '/workspace', executablePath, onEvent: (event) => Effect.sync(() => events.push(event)) }).pipe(
+  // The sink reaches the adapter to answer its asks, and only ever runs once it has been built.
+  let built: ClaudeAdapter | undefined;
+  built = Effect.runSync(
+    ClaudeAdapter.make({ cwd: '/workspace', executablePath, onEvent: recordingSink(events, answer, () => built) }).pipe(
       Scope.extend(scope),
       Effect.provide(services)
     )
   );
+  const adapter = built;
   const prompt = (text: string) => Effect.runPromise(adapter.prompt([{ type: 'text', text }]));
   const dispose = () => Effect.runPromise(Scope.close(scope, Exit.void));
   return { adapter, events, started, prompt, dispose };
 }
+
+/** The tool call updates in the events, as the adapter sent them. */
+const toolUpdates = (events: AgentEvent[]) =>
+  events.flatMap((event) =>
+    event.type === 'session_update' && (event.update.sessionUpdate === 'tool_call' || event.update.sessionUpdate === 'tool_call_update')
+      ? [event.update]
+      : []
+  );
 
 const chunks = (events: AgentEvent[]) =>
   events.flatMap((event) =>
@@ -128,6 +172,168 @@ describe('ClaudeAdapter', () => {
 
     await prompt('hi');
     expect(chunks(events)).toEqual([]);
+  });
+
+  it('shows a tool call Claude ran without asking, and what it returned', async () => {
+    const { events, prompt } = setup([
+      [
+        { dir: 'send', data: userMessage('read it') },
+        { dir: 'recv', data: toolUse('msg_1', 'toolu_1', 'Read', { file_path: '/workspace/notes.md' }) },
+        { dir: 'recv', data: toolResult('toolu_1', 'Buy milk') },
+        { dir: 'recv', data: result() },
+      ],
+    ]);
+
+    expect(await prompt('read it')).toBe('end_turn');
+    expect(toolUpdates(events)).toEqual([
+      {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'toolu_1',
+        title: 'Read /workspace/notes.md',
+        kind: 'read',
+        status: 'in_progress',
+        rawInput: { file_path: '/workspace/notes.md' },
+      },
+      {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'toolu_1',
+        status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text: 'Buy milk' } }],
+      },
+    ]);
+  });
+
+  it('asks the user before a tool Claude needs permission for, and allows it', async () => {
+    const { events, prompt } = setup(
+      [
+        [
+          { dir: 'send', data: userMessage('list them') },
+          asks('req_1', 'Bash', { command: 'ls' }),
+          answers('req_1', { behavior: 'allow', updatedInput: { command: 'ls' } }),
+          { dir: 'recv', data: toolUse('msg_1', 'toolu_1', 'Bash', { command: 'ls' }) },
+          { dir: 'recv', data: toolResult('toolu_1', 'notes.md') },
+          { dir: 'recv', data: result() },
+        ],
+      ],
+      { answer: () => 'allow' }
+    );
+
+    expect(await prompt('list them')).toBe('end_turn');
+    const request = events.find((event) => event.type === 'permission_request');
+    expect(request).toMatchObject({
+      turnId: 'turn-1',
+      requestId: 'permission-1',
+      toolCall: { toolCallId: 'toolu_1', title: 'ls', kind: 'execute', status: 'pending' },
+      // Claude suggested no permission rule, so there is nothing "Always" could remember.
+      options: [
+        { optionId: 'allow', name: 'Allow once', kind: 'allow_once' },
+        { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+      ],
+    });
+    expect(events).toContainEqual({
+      type: 'permission_resolved',
+      turnId: 'turn-1',
+      requestId: 'permission-1',
+      outcome: { outcome: 'selected', optionId: 'allow' },
+    });
+    // The ask shows the tool call; the tool use that follows it does not show it again.
+    expect(toolUpdates(events).map((update) => [update.sessionUpdate, update.status])).toEqual([
+      ['tool_call', 'pending'],
+      ['tool_call_update', 'in_progress'],
+      ['tool_call_update', 'completed'],
+    ]);
+  });
+
+  it('offers Always only when Claude suggests a rule that would stop it asking', async () => {
+    const { events, prompt } = setup(
+      [
+        [
+          { dir: 'send', data: userMessage('list them') },
+          asks('req_1', 'Bash', { command: 'ls' }, { suggestions: [{ type: 'addRules', rules: [{ toolName: 'Bash' }], behavior: 'allow', destination: 'session' }] }),
+          answers('req_1', {
+            behavior: 'allow',
+            updatedInput: { command: 'ls' },
+            updatedPermissions: [{ type: 'addRules', rules: [{ toolName: 'Bash' }], behavior: 'allow', destination: 'session' }],
+          }),
+          { dir: 'recv', data: result() },
+        ],
+      ],
+      { answer: () => 'allow_always' }
+    );
+
+    expect(await prompt('list them')).toBe('end_turn');
+    expect(events.find((event) => event.type === 'permission_request')?.options.map((option) => option.optionId)).toEqual([
+      'allow',
+      'allow_always',
+      'deny',
+    ]);
+  });
+
+  it('denies the tool when the user says no, and shows the call as failed', async () => {
+    const { events, prompt } = setup(
+      [
+        [
+          { dir: 'send', data: userMessage('remove it') },
+          asks('req_1', 'Bash', { command: 'rm -rf /' }),
+          answers('req_1', { behavior: 'deny', message: 'The user denied this tool call.' }),
+          { dir: 'recv', data: result() },
+        ],
+      ],
+      { answer: () => 'deny' }
+    );
+
+    expect(await prompt('remove it')).toBe('end_turn');
+    expect(toolUpdates(events).at(-1)).toEqual({ sessionUpdate: 'tool_call_update', toolCallId: 'toolu_1', status: 'failed' });
+  });
+
+  it('cancels an unanswered ask when the turn is stopped', async () => {
+    const { adapter, events, prompt } = setup([
+      [
+        { dir: 'send', data: userMessage('list them') },
+        asks('req_1', 'Bash', { command: 'ls' }),
+        answers('req_1', { behavior: 'deny', message: 'The turn was stopped before the user answered.', interrupt: true }),
+        { dir: 'recv', data: result() },
+      ],
+    ]);
+
+    const turn = prompt('list them');
+    await vi.waitFor(() => expect(events.some((event) => event.type === 'permission_request')).toBe(true));
+    await Effect.runPromise(adapter.cancel());
+
+    expect(await turn).toBe('cancelled');
+    expect(events).toContainEqual({ type: 'permission_resolved', turnId: 'turn-1', requestId: 'permission-1', outcome: { outcome: 'cancelled' } });
+  });
+
+  it('cancels an unanswered ask when the thread closes, and refuses answers after it', async () => {
+    const { adapter, events, prompt, dispose } = setup([
+      [
+        { dir: 'send', data: userMessage('list them') },
+        asks('req_1', 'Bash', { command: 'ls' }),
+        answers('req_1', { behavior: 'deny', message: 'The turn was stopped before the user answered.', interrupt: true }),
+      ],
+    ]);
+
+    const turn = prompt('list them');
+    await vi.waitFor(() => expect(events.some((event) => event.type === 'permission_request')).toBe(true));
+    await dispose();
+
+    expect(await turn).toBe('cancelled');
+    expect(events).toContainEqual({ type: 'permission_resolved', turnId: 'turn-1', requestId: 'permission-1', outcome: { outcome: 'cancelled' } });
+    const late = await Effect.runPromise(Effect.either(adapter.respond('permission-1', 'allow')));
+    expect(late).toEqual(Either.left(new UnknownPermissionRequest({ requestId: 'permission-1', optionId: 'allow' })));
+  });
+
+  it('refuses an answer that names an option the request never offered', async () => {
+    const { adapter, events, prompt } = setup(
+      [[{ dir: 'send', data: userMessage('list them') }, asks('req_1', 'Bash', { command: 'ls' })]],
+      {}
+    );
+
+    void prompt('list them');
+    await vi.waitFor(() => expect(events.some((event) => event.type === 'permission_request')).toBe(true));
+
+    const answer = await Effect.runPromise(Effect.either(adapter.respond('permission-1', 'allow_always')));
+    expect(answer).toEqual(Either.left(new UnknownPermissionRequest({ requestId: 'permission-1', optionId: 'allow_always' })));
   });
 
   it('reports a missing binary in the thread instead of starting Claude', async () => {

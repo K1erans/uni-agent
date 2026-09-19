@@ -1,4 +1,13 @@
-import type { AgentErrorCode, StopReason } from '../../src/agents/events';
+import type {
+  AgentErrorCode,
+  PermissionOption,
+  PermissionOutcome,
+  StopReason,
+  ToolCall,
+  ToolCallContent,
+  ToolCallStatus,
+  ToolKind,
+} from '../../src/agents/events';
 import type { ExtensionMessage, ThreadEvent, ThreadInfo } from '../../src/protocol';
 
 export interface ErrorItem {
@@ -12,6 +21,29 @@ export interface ErrorItem {
 export interface TextItem {
   id: string;
   text: string;
+  /** Where this arrived among everything the turn has shown, so replies and tool calls read in order. */
+  index: number;
+}
+
+/** A permission request the agent is waiting on, or the answer it was given. */
+export interface Approval {
+  requestId: string;
+  options: ReadonlyArray<PermissionOption>;
+  /** How it was answered; undefined while the agent is still waiting. */
+  outcome: PermissionOutcome | undefined;
+}
+
+/** One tool the agent ran or asked to run, with whatever it has said about it so far. */
+export interface ToolCallItem {
+  id: string;
+  title: string;
+  toolKind: ToolKind;
+  status: ToolCallStatus;
+  content: ReadonlyArray<ToolCallContent>;
+  rawInput: unknown;
+  rawOutput: unknown;
+  approval: Approval | undefined;
+  index: number;
 }
 
 /** One prompt and everything the agent sent back for it. */
@@ -26,6 +58,7 @@ export interface TurnItem {
   stopReason: StopReason | undefined;
   thoughts: TextItem[];
   messages: TextItem[];
+  tools: ToolCallItem[];
   errors: ErrorItem[];
 }
 
@@ -100,6 +133,7 @@ export function applyEvent(state: ThreadState, { event, at }: ThreadEvent): Thre
         stopReason: undefined,
         thoughts: [],
         messages: [],
+        tools: [],
         errors: [],
       };
       return { ...state, items: [...state.items, turn], running: true, lastError: undefined };
@@ -127,16 +161,57 @@ export function applyEvent(state: ThreadState, { event, at }: ThreadEvent): Thre
     }
     case 'session_update': {
       const { update } = event;
-      if (update.sessionUpdate !== 'agent_message_chunk' && update.sessionUpdate !== 'agent_thought_chunk') {
-        return state;
+      switch (update.sessionUpdate) {
+        case 'agent_message_chunk':
+        case 'agent_thought_chunk': {
+          const field = update.sessionUpdate === 'agent_message_chunk' ? 'messages' : 'thoughts';
+          return {
+            ...state,
+            items: updateTurn(state.items, event.turnId, (turn) => ({
+              ...turn,
+              [field]: appendText(turn[field], update.messageId, update.content.text, nextIndex(turn)),
+            })),
+          };
+        }
+        case 'tool_call':
+          return { ...state, items: updateTurn(state.items, event.turnId, (turn) => withToolCall(turn, update)) };
+        case 'tool_call_update':
+          return {
+            ...state,
+            items: updateTurn(state.items, event.turnId, (turn) => updateToolCall(turn, update.toolCallId, (tool) => merged(tool, update))),
+          };
+        default:
+          return state;
       }
-      const field = update.sessionUpdate === 'agent_message_chunk' ? 'messages' : 'thoughts';
+    }
+    case 'permission_request':
       return {
         ...state,
-        items: updateTurn(state.items, event.turnId, (turn) => ({
-          ...turn,
-          [field]: appendText(turn[field], update.messageId, update.content.text),
-        })),
+        items: updateTurn(state.items, event.turnId, (turn) => {
+          // The ask and the tool call are the same thing: the card belongs to the call it is about.
+          const asked = withToolCall(turn, { ...event.toolCall, status: 'pending' });
+          return updateToolCall(asked, event.toolCall.toolCallId, (tool) => ({
+            ...tool,
+            approval: { requestId: event.requestId, options: event.options, outcome: undefined },
+          }));
+        }),
+      };
+    case 'permission_resolved': {
+      const { requestId, outcome } = event;
+      return {
+        ...state,
+        items: updateTurn(state.items, event.turnId, (turn) => {
+          const tool = turn.tools.find((candidate) => candidate.approval?.requestId === requestId);
+          return tool === undefined
+            ? turn
+            : updateToolCall(turn, tool.id, (answered) => ({
+                ...answered,
+                approval: answered.approval && { ...answered.approval, outcome },
+                // The agent reports what the tool then did; until it does, the answer itself says
+                // whether the call went ahead.
+                status: answered.status === 'pending' ? statusAfter(answered, outcome) : answered.status,
+              }));
+        }),
       };
     }
     default:
@@ -164,21 +239,100 @@ function updateTurn(items: TranscriptItem[], turnId: string, update: (turn: Turn
   return index === -1 ? items : replaceAt(items, index, update);
 }
 
-function appendText(items: TextItem[], id: string, text: string): TextItem[] {
+function appendText(items: TextItem[], id: string, text: string, index: number): TextItem[] {
   // The streaming item is almost always the last one, so search from the end.
-  const index = items.findLastIndex((item) => item.id === id);
-  if (index === -1) {
-    return [...items, { id, text }];
+  const at = items.findLastIndex((item) => item.id === id);
+  if (at === -1) {
+    return [...items, { id, text, index }];
   }
   const next = items.slice();
-  next[index] = { id, text: items[index].text + text };
+  next[at] = { ...items[at], text: items[at].text + text };
   return next;
 }
 
+/** Where the next thing the turn shows belongs in the order everything arrived in. */
+function nextIndex(turn: TurnItem): number {
+  return turn.messages.length + turn.thoughts.length + turn.tools.length;
+}
+
+/** Adds a tool call, or replaces what is known about one already shown. */
+function withToolCall(turn: TurnItem, call: ToolCall): TurnItem {
+  const known = turn.tools.some((tool) => tool.id === call.toolCallId);
+  if (known) {
+    return updateToolCall(turn, call.toolCallId, (tool) => merged(tool, call));
+  }
+  return {
+    ...turn,
+    tools: [
+      ...turn.tools,
+      {
+        id: call.toolCallId,
+        title: call.title,
+        toolKind: call.kind,
+        status: call.status,
+        content: call.content ?? [],
+        rawInput: call.rawInput,
+        rawOutput: call.rawOutput,
+        approval: undefined,
+        index: nextIndex(turn),
+      },
+    ],
+  };
+}
+
+/** A tool call with what an update said about it; fields the agent left out keep the value they had. */
+function merged(tool: ToolCallItem, update: Partial<ToolCall>): ToolCallItem {
+  return {
+    ...tool,
+    title: told(update.title, tool.title),
+    toolKind: told(update.kind, tool.toolKind),
+    status: told(update.status, tool.status),
+    content: told(update.content, tool.content),
+    rawInput: told(update.rawInput, tool.rawInput),
+    rawOutput: told(update.rawOutput, tool.rawOutput),
+  };
+}
+
+function told<A>(update: A | undefined, known: A): A {
+  return update === undefined ? known : update;
+}
+
+function updateToolCall(turn: TurnItem, toolCallId: string, update: (tool: ToolCallItem) => ToolCallItem): TurnItem {
+  const index = turn.tools.findLastIndex((tool) => tool.id === toolCallId);
+  if (index === -1) {
+    return turn;
+  }
+  const tools = turn.tools.slice();
+  tools[index] = update(tools[index]);
+  return { ...turn, tools };
+}
+
+/** What became of a tool call the user has just answered for, until the agent says more. */
+function statusAfter(tool: ToolCallItem, outcome: PermissionOutcome): ToolCallStatus {
+  if (outcome.outcome === 'cancelled') {
+    return 'failed';
+  }
+  const chosen = tool.approval?.options.find((option) => option.optionId === outcome.optionId);
+  return chosen?.kind === 'allow_once' || chosen?.kind === 'allow_always' ? 'in_progress' : 'failed';
+}
+
+/** The tool calls a turn is waiting on an answer for. */
+export function waitingToolCalls(turn: TurnItem): ToolCallItem[] {
+  return turn.tools.filter((tool) => tool.approval !== undefined && tool.approval.outcome === undefined);
+}
+
+/** Whether the agent is waiting for the user to answer a permission request. */
+export function awaitingApproval(state: ThreadState): boolean {
+  return state.items.some((item) => item.kind === 'turn' && waitingToolCalls(item).length > 0);
+}
+
 /** How the thread's agent is doing, for the status dot in the heading. */
-export type AgentStatus = 'ready' | 'working' | 'not_found' | 'not_signed_in' | 'stopped';
+export type AgentStatus = 'ready' | 'working' | 'needs_approval' | 'not_found' | 'not_signed_in' | 'stopped';
 
 export function agentStatus(state: ThreadState): AgentStatus {
+  if (awaitingApproval(state)) {
+    return 'needs_approval';
+  }
   if (state.running) {
     return 'working';
   }

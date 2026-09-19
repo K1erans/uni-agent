@@ -1,8 +1,8 @@
-import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { StopReason } from '../../src/agents/events';
+import { memo, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import type { StopReason, ToolCallContent } from '../../src/agents/events';
 import { ChevronDownIcon } from './icons';
-import { ERROR_TITLES, formatDuration } from './labels';
-import type { ErrorItem, TextItem, TranscriptItem, TurnItem } from './threadState';
+import { ERROR_TITLES, formatDuration, TOOL_STATUS_LABELS } from './labels';
+import type { Approval, ErrorItem, TextItem, ToolCallItem, TranscriptItem, TurnItem } from './threadState';
 
 /** How close to the bottom (px) still counts as following the stream. */
 const FOLLOW_THRESHOLD = 48;
@@ -26,9 +26,11 @@ interface TranscriptProps {
   onRetry: (prompt: string) => void;
   /** Copies text to the clipboard. Must keep its identity across renders. */
   onCopy: (text: string) => void;
+  /** Answers a permission request with the option the user chose. Must keep its identity across renders. */
+  onRespond: (requestId: string, optionId: string) => void;
 }
 
-export function Transcript({ items, running, onRetry, onCopy }: TranscriptProps) {
+export function Transcript({ items, running, onRetry, onCopy, onRespond }: TranscriptProps) {
   const ref = useRef<HTMLElement>(null);
   const following = useRef(true);
   const lastTurnIndex = items.findLastIndex((item) => item.kind === 'turn');
@@ -68,6 +70,7 @@ export function Transcript({ items, running, onRetry, onCopy }: TranscriptProps)
             running={index === lastTurnIndex && running}
             onRetry={onRetry}
             onCopy={onCopy}
+            onRespond={onRespond}
           />
         ) : (
           <ErrorCard key={item.id} error={item} />
@@ -85,19 +88,19 @@ interface TurnViewProps {
   running: boolean;
   onRetry: (prompt: string) => void;
   onCopy: (text: string) => void;
+  onRespond: (requestId: string, optionId: string) => void;
 }
 
 /** Memoised on the turn object, which the reducer only replaces for the turn that changed. */
-const TurnView = memo(function TurnView({ turn, latest, running, onRetry, onCopy }: TurnViewProps) {
+const TurnView = memo(function TurnView({ turn, latest, running, onRetry, onCopy, onRespond }: TurnViewProps) {
   const ended = turn.stopReason !== undefined;
-  const waiting = !ended && turn.messages.length === 0 && turn.thoughts.length === 0 && turn.errors.length === 0;
+  const shown = turn.messages.length + turn.thoughts.length + turn.tools.length + turn.errors.length;
+  const waiting = !ended && shown === 0;
   return (
     <article className="turn">
       <div className="user-message">{turn.prompt}</div>
       <Activity turn={turn} />
-      {turn.messages.map((message) => (
-        <AgentMessage key={message.id} message={message} />
-      ))}
+      {body(turn, onRespond)}
       {waiting && <p className="working">Working…</p>}
       {turn.errors.map((error) => (
         <ErrorCard key={error.id} error={error} />
@@ -140,6 +143,96 @@ function Activity({ turn }: { turn: TurnItem }) {
         ))}
       </div>
     </details>
+  );
+}
+
+/** The turn's replies and tool calls, in the order the agent sent them. */
+function body(turn: TurnItem, onRespond: (requestId: string, optionId: string) => void): ReactNode[] {
+  const parts = [
+    ...turn.messages.map((message) => ({ index: message.index, node: <AgentMessage key={message.id} message={message} /> })),
+    ...turn.tools.map((tool) => ({ index: tool.index, node: <ToolCallView key={tool.id} tool={tool} onRespond={onRespond} /> })),
+  ];
+  return parts.sort((left, right) => left.index - right.index).map((part) => part.node);
+}
+
+interface ToolCallViewProps {
+  tool: ToolCallItem;
+  onRespond: (requestId: string, optionId: string) => void;
+}
+
+/**
+ * One tool call: what the agent ran, with its input and output a click away, and the permission
+ * card when it is waiting for an answer. It opens itself while it waits, so the ask is not hidden.
+ */
+const ToolCallView = memo(function ToolCallView({ tool, onRespond }: ToolCallViewProps) {
+  const asking = tool.approval !== undefined && tool.approval.outcome === undefined;
+  const input = tool.rawInput === undefined ? undefined : JSON.stringify(tool.rawInput, null, 2);
+  return (
+    <div className={`tool-call tool-call-${tool.status}`}>
+      <details className="tool-details" open={asking}>
+        <summary className="tool-summary">
+          <ChevronDownIcon size={12} className="tool-chevron" />
+          <span className="tool-title" title={tool.title}>
+            {tool.title}
+          </span>
+          <span className={`tool-status tool-status-${tool.status}`}>{TOOL_STATUS_LABELS[tool.status]}</span>
+        </summary>
+        <div className="tool-body">
+          {input !== undefined && <pre className="tool-input">{input}</pre>}
+          {tool.content.map((content, index) => (
+            <ToolContent key={index} content={content} />
+          ))}
+        </div>
+      </details>
+      {tool.approval && <ApprovalCard approval={tool.approval} onRespond={onRespond} />}
+    </div>
+  );
+});
+
+function ToolContent({ content }: { content: ToolCallContent }) {
+  if (content.type === 'diff') {
+    return (
+      <div className="tool-diff">
+        <p className="tool-diff-path">{content.path}</p>
+        <pre className="tool-output">{content.newText}</pre>
+      </div>
+    );
+  }
+  return <pre className="tool-output">{content.content.text}</pre>;
+}
+
+interface ApprovalCardProps {
+  approval: Approval;
+  onRespond: (requestId: string, optionId: string) => void;
+}
+
+/** The permission request itself: what the agent is waiting for, and the answers it offers. */
+function ApprovalCard({ approval, onRespond }: ApprovalCardProps) {
+  const { outcome } = approval;
+  if (outcome) {
+    const chosen = outcome.outcome === 'selected' ? approval.options.find((option) => option.optionId === outcome.optionId) : undefined;
+    return (
+      <p className="approval-answered" role="status">
+        {chosen ? chosen.name : 'Cancelled'}
+      </p>
+    );
+  }
+  return (
+    <div className="approval-card" role="group" aria-label="Permission request">
+      <p className="approval-question">The agent needs permission to continue.</p>
+      <div className="approval-actions">
+        {approval.options.map((option) => (
+          <button
+            key={option.optionId}
+            type="button"
+            className={`approval-button approval-${option.kind}`}
+            onClick={() => onRespond(approval.requestId, option.optionId)}
+          >
+            {option.name}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 

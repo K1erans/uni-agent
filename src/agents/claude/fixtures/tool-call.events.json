@@ -1,0 +1,177 @@
+[
+  {
+    "type": "session_started",
+    "agent": "claude",
+    "sessionId": "3bc07aa5-13a8-48ee-b2b9-3635b40e7453"
+  },
+  {
+    "type": "turn_started",
+    "turnId": "turn-1",
+    "prompt": [
+      {
+        "type": "text",
+        "text": "Search this directory for the text TODO and reply with how many matches you found."
+      }
+    ]
+  },
+  {
+    "type": "session_configured",
+    "model": "claude-opus-5[1m]",
+    "permissionMode": "default"
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_011CfDYhwZYfetzasdJt33vX:0",
+      "content": {
+        "type": "text",
+        "text": "I"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_011CfDYhwZYfetzasdJt33vX:0",
+      "content": {
+        "type": "text",
+        "text": "'ll search the directory for T"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_011CfDYhwZYfetzasdJt33vX:0",
+      "content": {
+        "type": "text",
+        "text": "ODO."
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "tool_call",
+      "toolCallId": "toolu_01Av4PKiHVokqqsVqzqLXHzJ",
+      "title": "grep -rI \"TODO\" /private/var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-Q4e9W4 2>/dev/null | wc -l",
+      "kind": "execute",
+      "status": "in_progress",
+      "rawInput": {
+        "command": "grep -rI \"TODO\" /private/var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-Q4e9W4 2>/dev/null | wc -l",
+        "description": "Count TODO matches in working directory"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "toolu_01Av4PKiHVokqqsVqzqLXHzJ",
+      "status": "completed",
+      "content": [
+        {
+          "type": "content",
+          "content": {
+            "type": "text",
+            "text": "       0"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "tool_call",
+      "toolCallId": "toolu_01E7MiK2yPJ5EEBBbvxgc92L",
+      "title": "ls -la /private/var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-Q4e9W4",
+      "kind": "execute",
+      "status": "in_progress",
+      "rawInput": {
+        "command": "ls -la /private/var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-Q4e9W4",
+        "description": "List directory contents"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "toolu_01E7MiK2yPJ5EEBBbvxgc92L",
+      "status": "completed",
+      "content": [
+        {
+          "type": "content",
+          "content": {
+            "type": "text",
+            "text": "total 0\ndrwx------@    2 krk  staff     64 Sep 19 22:58 .\ndrwx------@ 1181 krk  staff  37792 Sep 19 22:58 .."
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_011CfDYiK19YKnyNVkgJnKyS:0",
+      "content": {
+        "type": "text",
+        "text": "**0 matches."
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_011CfDYiK19YKnyNVkgJnKyS:0",
+      "content": {
+        "type": "text",
+        "text": "** The working"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_011CfDYiK19YKnyNVkgJnKyS:0",
+      "content": {
+        "type": "text",
+        "text": " directory is empty — there are"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_011CfDYiK19YKnyNVkgJnKyS:0",
+      "content": {
+        "type": "text",
+        "text": " no files to search."
+      }
+    }
+  },
+  {
+    "type": "turn_ended",
+    "turnId": "turn-1",
+    "stopReason": "end_turn"
+  }
+]

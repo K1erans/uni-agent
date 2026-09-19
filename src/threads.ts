@@ -33,6 +33,8 @@ export interface Threads {
   select(threadId: string): Effect.Effect<void>;
   /** Sends a prompt to the thread with this ID, whether or not it is shown. */
   prompt(threadId: string, text: string): Effect.Effect<void>;
+  /** Answers a permission request in the thread with this ID, whether or not it is shown. */
+  respond(threadId: string, requestId: string, optionId: string): Effect.Effect<void>;
 }
 
 /** The agent a thread talks to when nothing chose one. */
@@ -41,10 +43,12 @@ const DEFAULT_AGENT: AgentKind = 'claude';
 /**
  * @param workspace Where a new thread's agent runs, read when the thread is created.
  * @param makeAdapter Builds the adapter for a thread with the given agent, running in the given workspace.
+ * @param onChanged Told whenever any thread has seen an event, so views of the whole list can catch up.
  */
 export function makeThreads<R>(
   workspace: () => Workspace,
-  makeAdapter: (agent: AgentKind, workspace: Workspace) => MakeAdapter<R>
+  makeAdapter: (agent: AgentKind, workspace: Workspace) => MakeAdapter<R>,
+  onChanged: () => Effect.Effect<void> = () => Effect.void
 ): Effect.Effect<Threads, never, R | Ids | Branches | Scope.Scope> {
   return Effect.gen(function* () {
     const scope = yield* Effect.scope;
@@ -98,7 +102,7 @@ export function makeThreads<R>(
           return current;
         }
         const threadScope = yield* Scope.fork(scope, ExecutionStrategy.sequential);
-        const thread = yield* makeThread(yield* ids.next, where, makeAdapter(agent, where)).pipe(
+        const thread = yield* makeThread(yield* ids.next, where, makeAdapter(agent, where), onChanged).pipe(
           Scope.extend(threadScope),
           Effect.provide(context)
         );
@@ -147,6 +151,11 @@ export function makeThreads<R>(
         Option.match(find(threadId), {
           onNone: () => Effect.logWarning(`Ignored a prompt for unknown thread ${threadId}`),
           onSome: (thread) => thread.prompt(text),
+        }),
+      respond: (threadId, requestId, optionId) =>
+        Option.match(find(threadId), {
+          onNone: () => Effect.logWarning(`Ignored an answer for unknown thread ${threadId}`),
+          onSome: (thread) => thread.respond(requestId, optionId),
         }),
     };
   });

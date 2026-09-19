@@ -64,12 +64,21 @@ export function App({ post, drafts }: AppProps) {
     [post]
   );
   const copy = useCallback((text: string) => post({ type: 'copy', text }), [post]);
+  const respond = useCallback(
+    (requestId: string, optionId: string) => {
+      const { thread } = latest.current;
+      if (thread) {
+        post({ type: 'permission_response', threadId: thread.id, requestId, optionId });
+      }
+    },
+    [post]
+  );
 
   const agentName = state.thread ? AGENT_NAMES[state.thread.agent] : 'the agent';
   return (
     <main className="sidebar">
       <ThreadHeading state={state} />
-      <Transcript items={state.items} running={state.running} onRetry={sendPrompt} onCopy={copy} />
+      <Transcript items={state.items} running={state.running} onRetry={sendPrompt} onCopy={copy} onRespond={respond} />
       <Composer
         draft={draft}
         onDraftChange={setDraft}

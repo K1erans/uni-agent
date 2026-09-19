@@ -85,6 +85,29 @@ describe('Thread', () => {
     expect(thread.title).toBe('Add thread search');
   });
 
+  it('flags that it is waiting for an answer, and routes the answer to its adapter', async () => {
+    const { thread, adapter, prompt } = setup();
+    await prompt('hi');
+    expect(thread.needsApproval).toBe(false);
+
+    await adapter.askPermission('permission-1');
+    expect(thread.needsApproval).toBe(true);
+
+    await Effect.runPromise(thread.respond('permission-1', 'allow'));
+    expect(adapter.answers).toEqual([['permission-1', 'allow']]);
+    expect(thread.needsApproval).toBe(false);
+  });
+
+  it('drops an answer for a request the adapter no longer has open', async () => {
+    const { thread, adapter, prompt } = setup();
+    await prompt('hi');
+    await adapter.askPermission('permission-1');
+    await Effect.runPromise(thread.respond('permission-1', 'allow'));
+
+    await Effect.runPromise(thread.respond('permission-1', 'allow'));
+    expect(adapter.answers).toEqual([['permission-1', 'allow']]);
+  });
+
   it('stops the adapter when its scope closes', async () => {
     const { adapter, close } = setup();
     await close();

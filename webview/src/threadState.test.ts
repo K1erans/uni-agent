@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../../src/agents/events';
 import type { ThreadEvent, ThreadInfo } from '../../src/protocol';
-import { agentStatus, applyEvent, emptyThread, threadReducer, type ThreadState } from './threadState';
+import { agentStatus, applyEvent, awaitingApproval, emptyThread, threadReducer, type ThreadState, type TurnItem } from './threadState';
 
 const at = (event: AgentEvent, time = 0): ThreadEvent => ({ event, at: time });
 
@@ -68,7 +68,78 @@ describe('threadState', () => {
       throw new Error('expected turns');
     }
     expect(turnAfter.messages[0]).toBe(turnBefore.messages[0]);
-    expect(turnAfter.messages[1]).toEqual({ id: 'm:1', text: 'streaming' });
+    expect(turnAfter.messages[1]).toEqual({ id: 'm:1', text: 'streaming', index: 1 });
+  });
+
+  it('groups a tool call and what the agent said about it, in the order everything arrived', () => {
+    const state = fold([
+      at(turnStarted),
+      at(chunk('m:0', 'Looking')),
+      at({
+        type: 'session_update',
+        turnId: 't1',
+        update: { sessionUpdate: 'tool_call', toolCallId: 'call_1', title: 'ls', kind: 'execute', status: 'in_progress', rawInput: { command: 'ls' } },
+      }),
+      at({
+        type: 'session_update',
+        turnId: 't1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call_1',
+          status: 'completed',
+          content: [{ type: 'content', content: { type: 'text', text: 'notes.md' } }],
+        },
+      }),
+      at(chunk('m:1', 'Found it')),
+    ]);
+
+    const turn = onlyTurn(state);
+    expect(turn.tools).toEqual([
+      {
+        id: 'call_1',
+        title: 'ls',
+        toolKind: 'execute',
+        status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text: 'notes.md' } }],
+        rawInput: { command: 'ls' },
+        rawOutput: undefined,
+        approval: undefined,
+        index: 1,
+      },
+    ]);
+    expect(turn.messages.map((message) => message.index)).toEqual([0, 2]);
+  });
+
+  it('shows the ask on the tool call it is about, and what the user answered', () => {
+    const asked = fold([
+      at(turnStarted),
+      at({
+        type: 'permission_request',
+        turnId: 't1',
+        requestId: 'permission-1',
+        toolCall: { toolCallId: 'call_1', title: 'rm notes.md', kind: 'delete', status: 'pending' },
+        options: [
+          { optionId: 'allow', name: 'Allow once', kind: 'allow_once' },
+          { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+        ],
+      }),
+    ]);
+
+    expect(awaitingApproval(asked)).toBe(true);
+    expect(agentStatus(asked)).toBe('needs_approval');
+    expect(onlyTurn(asked).tools[0]).toMatchObject({ id: 'call_1', title: 'rm notes.md', status: 'pending', approval: { requestId: 'permission-1' } });
+
+    const allowed = applyEvent(asked, at({ type: 'permission_resolved', turnId: 't1', requestId: 'permission-1', outcome: { outcome: 'selected', optionId: 'allow' } }));
+    expect(awaitingApproval(allowed)).toBe(false);
+    // Until the agent says what the tool did, the answer itself says the call went ahead.
+    expect(onlyTurn(allowed).tools[0]).toMatchObject({ status: 'in_progress', approval: { outcome: { outcome: 'selected', optionId: 'allow' } } });
+
+    const denied = applyEvent(asked, at({ type: 'permission_resolved', turnId: 't1', requestId: 'permission-1', outcome: { outcome: 'selected', optionId: 'deny' } }));
+    expect(onlyTurn(denied).tools[0].status).toBe('failed');
+
+    const cancelled = applyEvent(asked, at({ type: 'permission_resolved', turnId: 't1', requestId: 'permission-1', outcome: { outcome: 'cancelled' } }));
+    expect(cancelled.items.length).toBe(1);
+    expect(onlyTurn(cancelled).tools[0].status).toBe('failed');
   });
 
   it('keeps turn errors in their turn and others in the transcript', () => {
@@ -121,3 +192,12 @@ describe('threadState', () => {
     expect(switched).toEqual({ ...emptyThread, thread: { id: 'thread-2', agent: 'claude', workspace: null } });
   });
 });
+
+/** The one turn the state holds, for tests that build a single turn. */
+function onlyTurn(state: ThreadState): TurnItem {
+  const turn = state.items.find((item) => item.kind === 'turn');
+  if (turn?.kind !== 'turn') {
+    throw new Error('expected a turn');
+  }
+  return turn;
+}

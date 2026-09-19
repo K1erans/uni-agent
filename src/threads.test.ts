@@ -173,6 +173,21 @@ describe('Threads', () => {
     expect(made[1].prompts).toEqual([]);
   });
 
+  it('answers permission requests in the thread they name, whether or not it is shown', async () => {
+    const { threads, made, run } = setup();
+    await run(threads.connect(webview().post));
+    await run(threads.prompt('thread-1', 'For the first thread'));
+    await made[0].askPermission('permission-1');
+    // The user switches away before answering; the thread waiting is still the one that gets it.
+    await run(threads.create());
+
+    await run(threads.respond('thread-1', 'permission-1', 'allow'));
+    await run(threads.respond('thread-9', 'permission-1', 'allow'));
+
+    expect(made[0].answers).toEqual([['permission-1', 'allow']]);
+    expect(threads.list().some((thread) => thread.needsApproval)).toBe(false);
+  });
+
   it('stops every thread when its scope closes', async () => {
     const { threads, made, run, close } = setup();
     await run(threads.connect(webview().post));

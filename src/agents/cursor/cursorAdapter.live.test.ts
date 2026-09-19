@@ -3,7 +3,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { Schema } from 'effect';
 import { describe, expect, it } from 'vitest';
+import type { AgentEvent } from '../events';
 import type { WireMessage } from '../traffic';
+import { TOOL_CALL_PROMPT } from '../../testing/prompts';
 import { recordFixture } from '../../testing/stdioFixtures';
 import { CursorAdapter } from './cursorAdapter';
 
@@ -15,9 +17,14 @@ import { CursorAdapter } from './cursorAdapter';
 const FIXTURES = path.join(__dirname, 'fixtures');
 
 const Notification = Schema.Struct({ method: Schema.String, params: Schema.optional(Schema.Unknown) });
-const ChunkUpdate = Schema.Struct({
+/** A request carries an ID, since the agent is waiting for an answer to it; a fixture keeps it whole. */
+const Request = Schema.Struct({ id: Schema.Union(Schema.String, Schema.Number) });
+/** The updates the adapter reads, which a fixture keeps whole. */
+const ReadUpdate = Schema.Struct({
   method: Schema.Literal('session/update'),
-  params: Schema.Struct({ update: Schema.Struct({ sessionUpdate: Schema.Literal('agent_message_chunk', 'agent_thought_chunk') }) }),
+  params: Schema.Struct({
+    update: Schema.Struct({ sessionUpdate: Schema.Literal('agent_message_chunk', 'agent_thought_chunk', 'tool_call', 'tool_call_update') }),
+  }),
 });
 const SessionUpdate = Schema.Struct({
   method: Schema.Literal('session/update'),
@@ -25,11 +32,11 @@ const SessionUpdate = Schema.Struct({
 });
 
 /**
- * Keeps message chunks whole but only the kind of other updates and notifications, which list the
- * user's own commands and setup.
+ * Keeps the updates the adapter reads whole, but only the kind of other updates and notifications,
+ * which list the user's own commands and setup.
  */
 function redact(message: WireMessage): WireMessage {
-  if (!Schema.is(Notification)(message) || Schema.is(ChunkUpdate)(message)) {
+  if (!Schema.is(Notification)(message) || Schema.is(Request)(message) || Schema.is(ReadUpdate)(message)) {
     return message;
   }
   if (Schema.is(SessionUpdate)(message)) {
@@ -51,6 +58,18 @@ describe('Cursor adapter (live)', () => {
     expect(events.at(-1)).toMatchObject({ type: 'turn_ended', stopReason: 'end_turn' });
   });
 
+  it('records a tool call the agent runs by itself', async () => {
+    const events = await record('tool-call', TOOL_CALL_PROMPT);
+
+    expect(events.filter((event) => event.type === 'error')).toEqual([]);
+    expect(toolCalls(events)).not.toEqual([]);
+    expect(events.at(-1)).toMatchObject({ type: 'turn_ended', stopReason: 'end_turn' });
+  });
+
+  // The Cursor CLI's agent mode edits files and runs commands by itself, so nothing it was asked
+  // here produced a `session/request_permission`. Its approval fixture is therefore written by
+  // hand from the shapes this suite records, and replayed by cursorAdapter.golden.test.ts.
+
   it('records a signed-out Cursor', async () => {
     // An empty home directory has no sign-in, so this never reads the user's own credentials.
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'uni-agent-signed-out-'));
@@ -60,3 +79,8 @@ describe('Cursor adapter (live)', () => {
     expect(events.at(-1)).toMatchObject({ type: 'turn_ended', stopReason: 'error' });
   });
 });
+
+/** The tool calls the events opened. */
+function toolCalls(events: AgentEvent[]) {
+  return events.filter((event) => event.type === 'session_update' && event.update.sessionUpdate === 'tool_call');
+}

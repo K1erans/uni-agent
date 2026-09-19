@@ -1,6 +1,8 @@
 import {
   query as sdkQuery,
+  type CanUseTool,
   type Options,
+  type PermissionResult,
   type Query,
   type SDKAssistantMessage,
   type SDKMessage,
@@ -8,13 +10,15 @@ import {
   type SDKResultMessage,
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
-import { Context, type Deferred, Effect, Layer, Queue, Runtime, type Scope, Stream } from 'effect';
+import { Context, type Deferred, Effect, Layer, Option, Queue, Runtime, Schema, type Scope, Stream } from 'effect';
 import { Ids } from '../../ids';
 import { notSignedInMessage, type AdapterOptions } from '../adapter';
 import { BaseAdapter } from '../baseAdapter';
-import type { AgentErrorCode, ContentBlock, StopReason } from '../events';
+import type { AgentErrorCode, ContentBlock, StopReason, ToolCall, ToolCallStatus } from '../events';
 import { Executables } from '../findExecutable';
+import { WireMessage } from '../traffic';
 import { Turn } from '../turn';
+import { describeTool, permissionOptions, ToolResultContent, toolResultContent } from './claudeTools';
 
 /** The part of the Agent SDK's `Query` the adapter uses; lets tests substitute a fake agent. */
 export type ClaudeQuery = AsyncIterable<SDKMessage> & Pick<Query, 'interrupt' | 'close'>;
@@ -172,9 +176,11 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
       if (this.connection) {
         return this.connection;
       }
+      const runtime = yield* Effect.runtime<never>();
       const connection = yield* Connection.open(this.sdk.query, {
         cwd: this.options.cwd,
         pathToClaudeCodeExecutable: executable,
+        canUseTool: this.canUseTool(runtime),
         ...(this.sessionExists ? { resume: this.sessionId } : { sessionId: this.sessionId }),
         includePartialMessages: true,
         systemPrompt: { type: 'preset', preset: 'claude_code' },
@@ -218,6 +224,8 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
         return this.handleStreamEvent(message);
       case 'assistant':
         return this.handleAssistant(message);
+      case 'user':
+        return this.handleUser(message);
       case 'result':
         return this.handleResult(message);
       default:
@@ -255,16 +263,86 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
       const code = NOT_SIGNED_IN_ERRORS.has(error) ? 'not_signed_in' : 'agent_error';
       return turn.reportError(code, errorMessage(code, text));
     }
-    // Complete copies of streamed messages carry nothing new; ones that never streamed (such as
-    // messages Claude Code synthesises itself) are shown whole.
-    if (turn.streamedMessageIds.has(message.id)) {
+    // Text that streamed carries nothing new in its complete copy; text that never streamed (such
+    // as messages Claude Code synthesises itself) is shown whole. Tool calls never stream whole,
+    // so they are always read from here.
+    const streamed = turn.streamedMessageIds.has(message.id);
+    return Effect.forEach(
+      message.content,
+      (block, index) => {
+        if (block.type === 'tool_use') {
+          // Claude runs a tool as soon as it has permission, so one it still has to ask about is
+          // already shown as pending by `canUseTool`.
+          return Option.match(decodeToolUse(block), {
+            onNone: () => Effect.logDebug(`Skipped a ${block.name} tool call whose input is not JSON`),
+            onSome: ({ id, name, input }) => this.showToolCall(turn, id, name, input, 'in_progress'),
+          });
+        }
+        return block.type === 'text' && !streamed ? turn.chunk('agent_message_chunk', `${message.id}:${index}`, block.text) : Effect.void;
+      },
+      { discard: true }
+    );
+  }
+
+  /** Tool results come back as the user messages Claude writes for itself. */
+  private handleUser({ message, parent_tool_use_id }: SDKUserMessage): Effect.Effect<void> {
+    const turn = this.turn;
+    if (!turn || parent_tool_use_id !== null || !Array.isArray(message.content)) {
       return Effect.void;
     }
     return Effect.forEach(
       message.content,
-      (block, index) => (block.type === 'text' ? turn.chunk('agent_message_chunk', `${message.id}:${index}`, block.text) : Effect.void),
+      (block) =>
+        block.type === 'tool_result'
+          ? turn.updateToolCall({
+              toolCallId: block.tool_use_id,
+              status: block.is_error ? 'failed' : 'completed',
+              content: Option.match(decodeToolResult(block.content), { onNone: () => [], onSome: toolResultContent }),
+            })
+          : Effect.void,
       { discard: true }
     );
+  }
+
+  /** Shows a tool call the first time it is seen, whether that is the tool use or the ask about it. */
+  private showToolCall(turn: ClaudeTurn, toolCallId: string, name: string, input: WireMessage, status: ToolCallStatus): Effect.Effect<ToolCall> {
+    const { title, kind } = describeTool(name, input);
+    const toolCall: ToolCall = { toolCallId, title, kind, status, rawInput: input };
+    // A tool call already shown keeps the status it has: an ask shows it as pending, and the
+    // message that asks for the tool must not then show it as running.
+    return Effect.suspend(() => (turn.hasToolCall(toolCallId) ? Effect.succeed(toolCall) : Effect.as(turn.toolCall(toolCall), toolCall)));
+  }
+
+  /**
+   * Claude asks permission through a callback that answers with a Promise, so the ask is bridged
+   * into the adapter's runtime and the Promise settles when the user answers. An answer that never
+   * comes is cancelled when the turn ends, so Claude is never left waiting.
+   */
+  private canUseTool(runtime: Runtime.Runtime<never>): CanUseTool {
+    return async (toolName, input, request) => Runtime.runPromise(runtime)(this.askPermission(toolName, input, request));
+  }
+
+  private askPermission(toolName: string, input: ToolInput, request: PermissionRequest): Effect.Effect<PermissionResult> {
+    return Effect.gen(this, function* () {
+      const turn = this.turn;
+      if (!turn) {
+        return DENIED_OUTSIDE_TURN;
+      }
+      const toolCall = yield* this.showToolCall(turn, request.toolUseID, toolName, toWire(input), 'pending');
+      const suggestions = request.suggestions ?? [];
+      const canAlwaysAllow = suggestions.length > 0 && !request.suppressAlwaysAllowRule;
+      const outcome = yield* this.approvals.ask(turn.id, toolCall, permissionOptions(canAlwaysAllow));
+      if (outcome.outcome === 'cancelled') {
+        yield* turn.updateToolCall({ toolCallId: toolCall.toolCallId, status: 'failed' });
+        return CANCELLED;
+      }
+      const allowed = outcome.optionId !== 'deny';
+      yield* turn.updateToolCall({ toolCallId: toolCall.toolCallId, status: allowed ? 'in_progress' : 'failed' });
+      if (!allowed) {
+        return DENIED;
+      }
+      return outcome.optionId === 'allow_always' ? { behavior: 'allow', updatedInput: input, updatedPermissions: suggestions } : { behavior: 'allow', updatedInput: input };
+    });
   }
 
   private handleResult(result: SDKResultMessage): Effect.Effect<void> {
@@ -282,6 +360,26 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
     return Effect.zipRight(turn.reportError(code, errorMessage(code, detail)), this.endTurn(turn, 'error'));
   }
 }
+
+/** A tool's input, as Claude's permission callback passes it; it goes back unchanged when the user allows the call. */
+type ToolInput = Parameters<CanUseTool>[1];
+
+/** What Claude says about a tool call it is asking permission for, beyond the tool's name and input. */
+type PermissionRequest = Parameters<CanUseTool>[2];
+
+const decodeWire = Schema.decodeUnknownOption(WireMessage);
+const decodeToolResult = Schema.decodeUnknownOption(ToolResultContent);
+/** A tool use as the assistant message carries it; its input is the tool's own JSON. */
+const decodeToolUse = Schema.decodeUnknownOption(Schema.Struct({ id: Schema.String, name: Schema.String, input: WireMessage }));
+
+/** A tool's input as JSON, for showing it in the thread; anything that is not JSON is shown as nothing. */
+function toWire(input: ToolInput): WireMessage {
+  return Option.getOrElse(decodeWire(input), (): WireMessage => null);
+}
+
+const DENIED: PermissionResult = { behavior: 'deny', message: 'The user denied this tool call.' };
+const CANCELLED: PermissionResult = { behavior: 'deny', message: 'The turn was stopped before the user answered.', interrupt: true };
+const DENIED_OUTSIDE_TURN: PermissionResult = { behavior: 'deny', message: 'Uni Agent has no turn running to ask the user about this tool call.' };
 
 /** Why a result ends its turn; `error` when Claude reports the turn failed. */
 function stopReasonOf(result: SDKResultMessage): StopReason {

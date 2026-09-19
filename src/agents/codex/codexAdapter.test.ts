@@ -1,6 +1,6 @@
 import { Effect, Either, Option } from 'effect';
 import { describe, expect, it, vi } from 'vitest';
-import { agentRequest, exit, methodNotFound, notification, notify, request, result, setupAdapter } from '../../testing/stdioFixtures';
+import { agentRequest, answer, exit, methodNotFound, notification, notify, request, result, setupAdapter } from '../../testing/stdioFixtures';
 import { TurnInProgress } from '../adapter';
 import { CLIENT_INFO } from '../jsonRpcAdapter';
 import type { TrafficLine, WireMessage } from '../traffic';
@@ -28,6 +28,19 @@ function turnStart(id: number, text: string): TrafficLine[] {
     result(id, { turn: { id: TURN } }),
   ];
 }
+
+const started = (item: WireMessage, threadId = THREAD) => notification('item/started', { threadId, turnId: TURN, item });
+const command = (status: string, output: WireMessage = null, exitCode: WireMessage = null): WireMessage => ({
+  type: 'commandExecution',
+  id: 'cmd_1',
+  command: 'ls',
+  cwd: '/workspace',
+  status,
+  aggregatedOutput: output,
+  exitCode,
+});
+const requestApproval = (id: number, method: string, params: { readonly [key: string]: WireMessage }) =>
+  agentRequest(id, method, { threadId: THREAD, turnId: TURN, startedAtMs: 0, ...params });
 
 const delta = (itemId: string, text: string, threadId = THREAD) =>
   notification('item/agentMessage/delta', { threadId, turnId: TURN, itemId, delta: text });
@@ -108,14 +121,130 @@ describe('CodexAdapter', () => {
       [
         ...handshake(),
         ...turnStart(4, 'hi'),
-        agentRequest(0, 'item/commandExecution/requestApproval', { threadId: THREAD }),
-        methodNotFound(0, 'item/commandExecution/requestApproval'),
+        agentRequest(0, 'item/tool/requestUserInput', { threadId: THREAD }),
+        methodNotFound(0, 'item/tool/requestUserInput'),
         turnCompleted('completed'),
       ],
     ]);
 
     expect(await prompt('hi')).toBe('end_turn');
     expect(errors()).toEqual([]);
+  });
+
+  it('shows a command Codex ran, with its output and exit code', async () => {
+    const { toolUpdates, errors, prompt } = setupAdapter(CodexAdapter.make, [
+      [
+        ...handshake(),
+        ...turnStart(4, 'list them'),
+        started(command('inProgress')),
+        completed(command('completed', 'notes.md', 0)),
+        turnCompleted('completed'),
+      ],
+    ]);
+
+    expect(await prompt('list them')).toBe('end_turn');
+    expect(errors()).toEqual([]);
+    expect(toolUpdates()).toEqual([
+      { sessionUpdate: 'tool_call', toolCallId: 'cmd_1', title: 'ls', kind: 'execute', status: 'in_progress', rawInput: { command: 'ls', cwd: '/workspace' } },
+      {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'cmd_1',
+        title: 'ls',
+        kind: 'execute',
+        status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text: 'notes.md' } }],
+        rawInput: { command: 'ls', cwd: '/workspace' },
+        rawOutput: { exitCode: 0 },
+      },
+    ]);
+  });
+
+  it('asks the user before a command Codex wants approved, and sends back the decision', async () => {
+    const { events, prompt } = setupAdapter(
+      CodexAdapter.make,
+      [
+        [
+          ...handshake(),
+          ...turnStart(4, 'list them'),
+          started(command('inProgress')),
+          requestApproval(0, 'item/commandExecution/requestApproval', { itemId: 'cmd_1', command: 'ls', cwd: '/workspace', kind: 'command', environmentId: null }),
+          answer(0, { decision: 'acceptForSession' }),
+          completed(command('completed', 'notes.md', 0)),
+          turnCompleted('completed'),
+        ],
+      ],
+      undefined,
+      () => 'acceptForSession'
+    );
+
+    expect(await prompt('list them')).toBe('end_turn');
+    expect(events.find((event) => event.type === 'permission_request')).toMatchObject({
+      turnId: 'turn-1',
+      requestId: 'permission-1',
+      toolCall: { toolCallId: 'cmd_1', title: 'ls', kind: 'execute', status: 'pending' },
+      options: [
+        { optionId: 'accept', kind: 'allow_once' },
+        { optionId: 'acceptForSession', kind: 'allow_always' },
+        { optionId: 'decline', kind: 'reject_once' },
+      ],
+    });
+    expect(events).toContainEqual({
+      type: 'permission_resolved',
+      turnId: 'turn-1',
+      requestId: 'permission-1',
+      outcome: { outcome: 'selected', optionId: 'acceptForSession' },
+    });
+  });
+
+  it('names the host when Codex asks to reach the network, and passes a refusal on', async () => {
+    const { events, prompt } = setupAdapter(
+      CodexAdapter.make,
+      [
+        [
+          ...handshake(),
+          ...turnStart(4, 'fetch it'),
+          requestApproval(0, 'item/commandExecution/requestApproval', {
+            itemId: 'cmd_1',
+            command: 'curl https://example.com',
+            kind: 'command',
+            environmentId: null,
+            networkApprovalContext: { host: 'example.com', protocol: 'https' },
+          }),
+          answer(0, { decision: 'decline' }),
+          turnCompleted('completed'),
+        ],
+      ],
+      undefined,
+      () => 'decline'
+    );
+
+    expect(await prompt('fetch it')).toBe('end_turn');
+    expect(events.find((event) => event.type === 'permission_request')?.toolCall).toMatchObject({
+      title: 'Allow network access to example.com',
+      kind: 'fetch',
+    });
+  });
+
+  it('cancels an unanswered approval when the turn is stopped', async () => {
+    const { adapter, events, prompt } = setupAdapter(CodexAdapter.make, [
+      [
+        ...handshake(),
+        ...turnStart(4, 'list them'),
+        requestApproval(0, 'item/fileChange/requestApproval', { itemId: 'patch_1' }),
+        // Codex is interrupted first, and the approval it is waiting on is answered as cancelled.
+        request(5, 'turn/interrupt', { threadId: THREAD, turnId: TURN }),
+        result(5, {}),
+        answer(0, { decision: 'cancel' }),
+        turnCompleted('interrupted'),
+      ],
+    ]);
+
+    const turn = prompt('list them');
+    await vi.waitFor(() => expect(events.some((event) => event.type === 'permission_request')).toBe(true));
+    await Effect.runPromise(adapter.cancel());
+
+    expect(await turn).toBe('cancelled');
+    expect(events).toContainEqual({ type: 'permission_resolved', turnId: 'turn-1', requestId: 'permission-1', outcome: { outcome: 'cancelled' } });
   });
 
   it('interrupts the running turn when cancelled', async () => {

@@ -25,18 +25,43 @@ export interface Thread {
   readonly title: string | undefined;
   /** Whether no prompt has been sent yet. */
   readonly isEmpty: boolean;
+  /** Whether the agent is waiting for the user to answer a permission request. */
+  readonly needsApproval: boolean;
   /** Connects a webview, replacing any previous one, and sends it the history so far. */
   attach(post: Post): Effect.Effect<void>;
   /** Stops forwarding events to the connected webview. */
   detach(): Effect.Effect<void>;
   /** Starts a turn; blank prompts and prompts sent while a turn runs are ignored. */
   prompt(text: string): Effect.Effect<void>;
+  /** Answers a permission request the agent is waiting on; an answer it cannot place is logged and dropped. */
+  respond(requestId: string, optionId: string): Effect.Effect<void>;
 }
 
+/**
+ * The permission requests a thread's events leave open: those announced and not resolved since.
+ * Adapters resolve every request before their turn ends, so this is empty between turns.
+ */
+export function openApprovals(events: ReadonlyArray<ThreadEvent>): ReadonlySet<string> {
+  const open = new Set<string>();
+  for (const { event } of events) {
+    if (event.type === 'permission_request') {
+      open.add(event.requestId);
+    } else if (event.type === 'permission_resolved') {
+      open.delete(event.requestId);
+    }
+  }
+  return open;
+}
+
+/**
+ * @param onChanged Told whenever the thread has seen an event, so a view outside the webview (the
+ * thread list, the sidebar's badge) can catch up with, for example, a thread waiting for approval.
+ */
 export function makeThread<R>(
   id: string,
   workspace: Workspace,
-  makeAdapter: MakeAdapter<R>
+  makeAdapter: MakeAdapter<R>,
+  onChanged: () => Effect.Effect<void> = () => Effect.void
 ): Effect.Effect<Thread, never, R | Scope.Scope> {
   return Effect.gen(function* () {
     const scope = yield* Effect.scope;
@@ -55,7 +80,7 @@ export function makeThread<R>(
           title = threadTitle(event.prompt.map((block) => block.text).join('\n'));
         }
         history.push({ event, at });
-        return post ? post({ type: 'event', threadId: id, event, at }) : Effect.void;
+        return Effect.zipRight(post ? post({ type: 'event', threadId: id, event, at }) : Effect.void, onChanged());
       })
     );
     // Finalizers run in reverse, so this runs before the adapter stops and its last events are not
@@ -71,6 +96,9 @@ export function makeThread<R>(
       },
       get isEmpty() {
         return !prompted;
+      },
+      get needsApproval() {
+        return openApprovals(history).size > 0;
       },
       attach: (next) =>
         Effect.suspend(() => {
@@ -94,6 +122,12 @@ export function makeThread<R>(
             Effect.asVoid
           );
         }),
+      respond: (requestId, optionId) =>
+        // An answer for a request that is no longer open (the turn ended, or a second click) is
+        // nothing to act on, and never a reason to break the thread.
+        Effect.catchTag(adapter.respond(requestId, optionId), 'UnknownPermissionRequest', (error) =>
+          Effect.logDebug(`Ignored an answer for permission request ${error.requestId} of thread ${id}`)
+        ),
     };
   });
 }

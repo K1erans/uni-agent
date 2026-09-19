@@ -1,4 +1,4 @@
-import type { AgentErrorCode } from '../../src/agents/events';
+import type { AgentErrorCode, ToolCallStatus } from '../../src/agents/events';
 import type { AgentStatus } from './threadState';
 
 export { AGENT_NAMES } from '../../src/agents/events';
@@ -6,6 +6,7 @@ export { AGENT_NAMES } from '../../src/agents/events';
 export const STATUS_LABELS = {
   ready: 'Ready',
   working: 'Working',
+  needs_approval: 'Needs approval',
   not_found: 'Not found',
   not_signed_in: 'Not signed in',
   stopped: 'Stopped',
@@ -30,6 +31,14 @@ const PERMISSION_MODES = new Map([
 export function permissionLabel(mode: string): string {
   return PERMISSION_MODES.get(mode) ?? mode;
 }
+
+/** What a tool call's status says it is doing, for the badge on its header. */
+export const TOOL_STATUS_LABELS = {
+  pending: 'Waiting',
+  in_progress: 'Running',
+  completed: 'Done',
+  failed: 'Failed',
+} satisfies Record<ToolCallStatus, string>;
 
 /** A compact duration: `42s`, `3m 5s`, `1h 2m`. */
 export function formatDuration(ms: number): string {

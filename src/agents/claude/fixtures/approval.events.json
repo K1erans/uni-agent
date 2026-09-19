@@ -1,0 +1,122 @@
+[
+  {
+    "type": "session_started",
+    "agent": "claude",
+    "sessionId": "a8ae0ec3-4f9a-4189-9f98-bf4c0b366d59"
+  },
+  {
+    "type": "turn_started",
+    "turnId": "turn-1",
+    "prompt": [
+      {
+        "type": "text",
+        "text": "Create a file called approved.txt containing the word hi, then reply done."
+      }
+    ]
+  },
+  {
+    "type": "session_configured",
+    "model": "claude-opus-5[1m]",
+    "permissionMode": "default"
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "tool_call",
+      "toolCallId": "toolu_01Q63YeXXr2TWC3r79jbATZd",
+      "title": "Write /private/var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-29MZqu/approved.txt",
+      "kind": "edit",
+      "status": "in_progress",
+      "rawInput": {
+        "file_path": "/private/var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-29MZqu/approved.txt",
+        "content": "hi\n"
+      }
+    }
+  },
+  {
+    "type": "permission_request",
+    "turnId": "turn-1",
+    "requestId": "permission-1",
+    "toolCall": {
+      "toolCallId": "toolu_01Q63YeXXr2TWC3r79jbATZd",
+      "title": "Write /private/var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-29MZqu/approved.txt",
+      "kind": "edit",
+      "status": "pending",
+      "rawInput": {
+        "file_path": "/private/var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-29MZqu/approved.txt",
+        "content": "hi\n"
+      }
+    },
+    "options": [
+      {
+        "optionId": "allow",
+        "name": "Allow once",
+        "kind": "allow_once"
+      },
+      {
+        "optionId": "allow_always",
+        "name": "Always allow",
+        "kind": "allow_always"
+      },
+      {
+        "optionId": "deny",
+        "name": "Deny",
+        "kind": "reject_once"
+      }
+    ]
+  },
+  {
+    "type": "permission_resolved",
+    "turnId": "turn-1",
+    "requestId": "permission-1",
+    "outcome": {
+      "outcome": "selected",
+      "optionId": "allow"
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "toolu_01Q63YeXXr2TWC3r79jbATZd",
+      "status": "in_progress"
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "toolu_01Q63YeXXr2TWC3r79jbATZd",
+      "status": "completed",
+      "content": [
+        {
+          "type": "content",
+          "content": {
+            "type": "text",
+            "text": "File created successfully at: /private/var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-29MZqu/approved.txt (file state is current in your context — no need to Read it back)"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_011CfDZgAE7bSvkUpSiE2RL8:0",
+      "content": {
+        "type": "text",
+        "text": "done"
+      }
+    }
+  },
+  {
+    "type": "turn_ended",
+    "turnId": "turn-1",
+    "stopReason": "end_turn"
+  }
+]

@@ -1,6 +1,6 @@
 import { Effect } from 'effect';
 import { describe, expect, it, vi } from 'vitest';
-import { agentRequest, exit, methodNotFound, notification, notify, request, result, setupAdapter } from '../../testing/stdioFixtures';
+import { agentRequest, answer, exit, methodNotFound, notification, notify, request, result, setupAdapter } from '../../testing/stdioFixtures';
 import { CLIENT_INFO } from '../jsonRpcAdapter';
 import type { TrafficLine, WireMessage } from '../traffic';
 import { CursorAdapter } from './cursorAdapter';
@@ -30,6 +30,12 @@ const handshake: TrafficLine[] = [
 const prompt = (id: number, text: string) => request(id, 'session/prompt', { sessionId: SESSION, prompt: [{ type: 'text', text }] });
 const update = (value: WireMessage) => notification('session/update', { sessionId: SESSION, update: value });
 const chunk = (sessionUpdate: string, text: string) => update({ sessionUpdate, content: { type: 'text', text } });
+const TOOL_CALL = { toolCallId: 'call_1', title: 'ls', kind: 'execute', status: 'pending', rawInput: { command: 'ls' } };
+const PERMISSION_OPTIONS = [
+  { optionId: 'proceed_once', name: 'Allow', kind: 'allow_once' },
+  { optionId: 'proceed_always', name: 'Always Allow', kind: 'allow_always' },
+  { optionId: 'reject_once', name: 'Reject', kind: 'reject_once' },
+];
 
 describe('CursorAdapter', () => {
   it('starts `agent acp` with the first prompt and announces the session Cursor creates', async () => {
@@ -76,14 +82,132 @@ describe('CursorAdapter', () => {
         prompt(3, 'hi'),
         agentRequest(7, 'cursor/ask_question', { question: 'Which?' }),
         methodNotFound(7, 'cursor/ask_question'),
-        agentRequest(8, 'session/request_permission', { sessionId: SESSION }),
-        methodNotFound(8, 'session/request_permission'),
         result(3, { stopReason: 'end_turn' }),
       ],
     ]);
 
     expect(await setup.prompt('hi')).toBe('end_turn');
     expect(setup.errors()).toEqual([]);
+  });
+
+  it('shows a tool call and what the agent says about it as it runs', async () => {
+    const setup = setupAdapter(CursorAdapter.make, [
+      [
+        ...handshake,
+        prompt(3, 'list them'),
+        update({ sessionUpdate: 'tool_call', ...TOOL_CALL, status: 'in_progress' }),
+        update({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call_1',
+          status: 'completed',
+          content: [
+            { type: 'content', content: { type: 'text', text: 'notes.md' } },
+            { type: 'content', content: { type: 'image', data: '', mimeType: 'image/png' } },
+            { type: 'diff', path: '/workspace/notes.md', newText: 'Buy milk' },
+          ],
+        }),
+        // An update for a tool call the agent never opened is nothing the thread can show.
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_unknown', status: 'completed' }),
+        result(3, { stopReason: 'end_turn' }),
+      ],
+    ]);
+
+    expect(await setup.prompt('list them')).toBe('end_turn');
+    expect(setup.errors()).toEqual([]);
+    expect(setup.toolUpdates()).toEqual([
+      { sessionUpdate: 'tool_call', toolCallId: 'call_1', title: 'ls', kind: 'execute', status: 'in_progress', rawInput: { command: 'ls' } },
+      {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call_1',
+        title: undefined,
+        kind: undefined,
+        status: 'completed',
+        content: [
+          { type: 'content', content: { type: 'text', text: 'notes.md' } },
+          { type: 'diff', path: '/workspace/notes.md', oldText: null, newText: 'Buy milk' },
+        ],
+        rawInput: undefined,
+        rawOutput: undefined,
+      },
+    ]);
+  });
+
+  it('asks the user when the agent requests permission, and answers with the option they chose', async () => {
+    const setup = setupAdapter(
+      CursorAdapter.make,
+      [
+        [
+          ...handshake,
+          prompt(3, 'list them'),
+          update({ sessionUpdate: 'tool_call', ...TOOL_CALL }),
+          agentRequest(8, 'session/request_permission', { sessionId: SESSION, toolCall: { toolCallId: 'call_1' }, options: PERMISSION_OPTIONS }),
+          answer(8, { outcome: { outcome: 'selected', optionId: 'proceed_once' } }),
+          update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_1', status: 'completed' }),
+          result(3, { stopReason: 'end_turn' }),
+        ],
+      ],
+      undefined,
+      () => 'proceed_once'
+    );
+
+    expect(await setup.prompt('list them')).toBe('end_turn');
+    expect(setup.events.find((event) => event.type === 'permission_request')).toMatchObject({
+      turnId: 'turn-1',
+      requestId: 'permission-1',
+      // The ask names the tool call the agent already opened, so the card belongs to it.
+      toolCall: { toolCallId: 'call_1', status: 'pending' },
+      options: PERMISSION_OPTIONS,
+    });
+    expect(setup.events).toContainEqual({
+      type: 'permission_resolved',
+      turnId: 'turn-1',
+      requestId: 'permission-1',
+      outcome: { outcome: 'selected', optionId: 'proceed_once' },
+    });
+  });
+
+  it('leaves out options of kinds it does not know, and cancels an ask with none left', async () => {
+    const setup = setupAdapter(CursorAdapter.make, [
+      [
+        ...handshake,
+        prompt(3, 'list them'),
+        agentRequest(8, 'session/request_permission', {
+          sessionId: SESSION,
+          toolCall: { toolCallId: 'call_1', title: 'ls' },
+          options: [{ optionId: 'ask_later', name: 'Ask later', kind: 'defer' }],
+        }),
+        answer(8, { outcome: { outcome: 'cancelled' } }),
+        result(3, { stopReason: 'end_turn' }),
+      ],
+    ]);
+
+    expect(await setup.prompt('list them')).toBe('end_turn');
+    expect(setup.events.some((event) => event.type === 'permission_request')).toBe(false);
+  });
+
+  it('cancels an unanswered ask when the turn is stopped', async () => {
+    const setup = setupAdapter(CursorAdapter.make, [
+      [
+        ...handshake,
+        prompt(3, 'list them'),
+        agentRequest(8, 'session/request_permission', { sessionId: SESSION, toolCall: { toolCallId: 'call_1', title: 'ls' }, options: PERMISSION_OPTIONS }),
+        notify('session/cancel', { sessionId: SESSION }),
+        answer(8, { outcome: { outcome: 'cancelled' } }),
+        result(3, { stopReason: 'cancelled' }),
+      ],
+    ]);
+
+    const turn = setup.prompt('list them');
+    await vi.waitFor(() => expect(setup.events.some((event) => event.type === 'permission_request')).toBe(true));
+    await Effect.runPromise(setup.adapter.cancel());
+
+    expect(await turn).toBe('cancelled');
+    expect(setup.events).toContainEqual({
+      type: 'permission_resolved',
+      turnId: 'turn-1',
+      requestId: 'permission-1',
+      outcome: { outcome: 'cancelled' },
+    });
   });
 
   it('sends session/cancel when cancelled, and ends the turn as cancelled', async () => {
