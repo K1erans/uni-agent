@@ -1,5 +1,6 @@
 import { Effect, ExecutionStrategy, Exit, Option, Scope } from 'effect';
 import type { MakeAdapter } from './agents/adapter';
+import type { AgentKind } from './agents/events';
 import { Branches } from './branches';
 import { Ids } from './ids';
 import { makeThread, type Post, type Thread, type Workspace } from './thread';
@@ -23,21 +24,27 @@ export interface Threads {
   connect(post: Post): Effect.Effect<void>;
   /** Disconnects the webview, if `post` is still the connected one, and stops it connecting again. */
   disconnect(post: Post): Effect.Effect<void>;
-  /** Shows a new thread. A current thread nobody has prompted yet is shown again instead. */
-  create(): Effect.Effect<Thread>;
+  /**
+   * Shows a new thread with `agent`, by default the shown thread's agent (Claude when there is
+   * none). A current thread with that agent that nobody has prompted yet is shown again instead.
+   */
+  create(agent?: AgentKind): Effect.Effect<Thread>;
   /** Shows the thread with this ID; unknown IDs are ignored. */
   select(threadId: string): Effect.Effect<void>;
   /** Sends a prompt to the thread with this ID, whether or not it is shown. */
   prompt(threadId: string, text: string): Effect.Effect<void>;
 }
 
+/** The agent a thread talks to when nothing chose one. */
+const DEFAULT_AGENT: AgentKind = 'claude';
+
 /**
  * @param workspace Where a new thread's agent runs, read when the thread is created.
- * @param makeAdapter Builds the agent adapter for a thread running in the given workspace.
+ * @param makeAdapter Builds the adapter for a thread with the given agent, running in the given workspace.
  */
 export function makeThreads<R>(
   workspace: () => Workspace,
-  makeAdapter: (workspace: Workspace) => MakeAdapter<R>
+  makeAdapter: (agent: AgentKind, workspace: Workspace) => MakeAdapter<R>
 ): Effect.Effect<Threads, never, R | Ids | Branches | Scope.Scope> {
   return Effect.gen(function* () {
     const scope = yield* Effect.scope;
@@ -84,20 +91,21 @@ export function makeThreads<R>(
           .pipe(Scope.extend(watch));
       });
 
-    const create = Effect.gen(function* () {
-      const where = workspace();
-      if (current?.isEmpty && current.workspace.cwd === where.cwd) {
-        return current;
-      }
-      const threadScope = yield* Scope.fork(scope, ExecutionStrategy.sequential);
-      const thread = yield* makeThread(yield* ids.next, where, makeAdapter(where)).pipe(
-        Scope.extend(threadScope),
-        Effect.provide(context)
-      );
-      threads.unshift(thread);
-      yield* show(thread);
-      return thread;
-    });
+    const create = (agent = current?.info.agent ?? DEFAULT_AGENT) =>
+      Effect.gen(function* () {
+        const where = workspace();
+        if (current?.isEmpty && current.info.agent === agent && current.workspace.cwd === where.cwd) {
+          return current;
+        }
+        const threadScope = yield* Scope.fork(scope, ExecutionStrategy.sequential);
+        const thread = yield* makeThread(yield* ids.next, where, makeAdapter(agent, where)).pipe(
+          Scope.extend(threadScope),
+          Effect.provide(context)
+        );
+        threads.unshift(thread);
+        yield* show(thread);
+        return thread;
+      });
 
     const find = (threadId: string) => Option.fromNullable(threads.find((thread) => thread.info.id === threadId));
 
@@ -113,7 +121,7 @@ export function makeThreads<R>(
               return Effect.void;
             }
             connected = post;
-            return current ? show(current) : Effect.asVoid(create);
+            return current ? show(current) : Effect.asVoid(create());
           })
         ),
       disconnect: (post) =>
@@ -127,7 +135,7 @@ export function makeThreads<R>(
             return Effect.zipRight(stopBranchWatch, current ? current.detach() : Effect.void);
           })
         ),
-      create: () => serial(create),
+      create: (agent) => serial(create(agent)),
       select: (threadId) =>
         serial(
           Option.match(find(threadId), {

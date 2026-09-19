@@ -12,7 +12,7 @@ function receive(message: ExtensionMessage) {
   });
 }
 
-const THREAD: ThreadInfo = { id: 'thread-1', workspace: 'uni-agent' };
+const THREAD: ThreadInfo = { id: 'thread-1', agent: 'claude', workspace: 'uni-agent' };
 
 /** Shows a thread with these events, as the extension does when the webview reports ready. */
 function open(events: AgentEvent[] = [{ type: 'session_started', agent: 'claude', sessionId: 's1' }], thread = THREAD) {
@@ -47,6 +47,14 @@ describe('App', () => {
     expect(input().placeholder).toBe('Message Claude Code…');
     expect(sendButton().disabled).toBe(true);
     expect(screen.getByText('Enter to send · Shift + Enter for a new line').id).toBe(input().getAttribute('aria-describedby'));
+  });
+
+  it('names the thread’s agent, whichever it is', () => {
+    render(<App post={() => {}} />);
+    open([], { id: 'thread-2', agent: 'codex', workspace: 'uni-agent' });
+
+    expect(screen.getByText('Codex')).toBeTruthy();
+    expect(input().placeholder).toBe('Message Codex…');
   });
 
   it('cannot send before the extension has sent a thread', () => {
@@ -173,7 +181,7 @@ describe('App', () => {
     open();
     event(turnStarted('First thread'));
 
-    open([{ type: 'session_started', agent: 'claude', sessionId: 's2' }], { id: 'thread-2', workspace: null });
+    open([{ type: 'session_started', agent: 'claude', sessionId: 's2' }], { id: 'thread-2', agent: 'claude', workspace: null });
     expect(screen.queryByText('First thread')).toBeNull();
     expect(screen.getByRole('heading', { name: 'New thread' })).toBeTruthy();
     expect(screen.getByText('No folder open', { selector: '.meta-workspace' })).toBeTruthy();
@@ -195,7 +203,7 @@ describe('App', () => {
     type('Half-written prompt');
 
     // Another thread starts with its own, empty draft; the first thread's is not sent there.
-    open([], { id: 'thread-2', workspace: 'uni-agent' });
+    open([], { id: 'thread-2', agent: 'claude', workspace: 'uni-agent' });
     expect(input().value).toBe('');
     fireEvent.keyDown(input(), { key: 'Enter' });
     expect(post).not.toHaveBeenCalled();
@@ -205,7 +213,7 @@ describe('App', () => {
     render(<App post={post} drafts={drafts} />);
     open();
     expect(input().value).toBe('Half-written prompt');
-    open([], { id: 'thread-2', workspace: 'uni-agent' });
+    open([], { id: 'thread-2', agent: 'claude', workspace: 'uni-agent' });
     expect(input().value).toBe('For the second thread');
   });
 

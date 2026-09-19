@@ -65,7 +65,7 @@ export function App({ post, drafts }: AppProps) {
   );
   const copy = useCallback((text: string) => post({ type: 'copy', text }), [post]);
 
-  const agentName = state.agent ? AGENT_NAMES[state.agent] : 'the agent';
+  const agentName = state.thread ? AGENT_NAMES[state.thread.agent] : 'the agent';
   return (
     <main className="sidebar">
       <ThreadHeading state={state} />

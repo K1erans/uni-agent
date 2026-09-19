@@ -1,0 +1,135 @@
+[
+  {
+    "type": "turn_started",
+    "turnId": "turn-1",
+    "prompt": [
+      {
+        "type": "text",
+        "text": "Count from 1 to 5, one number per line. Reply with nothing else."
+      }
+    ]
+  },
+  {
+    "type": "session_started",
+    "agent": "codex",
+    "sessionId": "01a0b9e8-6ea6-7603-a3c4-351272eff902"
+  },
+  {
+    "type": "session_configured",
+    "model": "gpt-6-astra",
+    "permissionMode": "on-request"
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_0c8c20b3ec27d197016aae9189c49487d2bf431c24855d5776",
+      "content": {
+        "type": "text",
+        "text": "1"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_0c8c20b3ec27d197016aae9189c49487d2bf431c24855d5776",
+      "content": {
+        "type": "text",
+        "text": "\n"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_0c8c20b3ec27d197016aae9189c49487d2bf431c24855d5776",
+      "content": {
+        "type": "text",
+        "text": "2"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_0c8c20b3ec27d197016aae9189c49487d2bf431c24855d5776",
+      "content": {
+        "type": "text",
+        "text": "\n"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_0c8c20b3ec27d197016aae9189c49487d2bf431c24855d5776",
+      "content": {
+        "type": "text",
+        "text": "3"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_0c8c20b3ec27d197016aae9189c49487d2bf431c24855d5776",
+      "content": {
+        "type": "text",
+        "text": "\n"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_0c8c20b3ec27d197016aae9189c49487d2bf431c24855d5776",
+      "content": {
+        "type": "text",
+        "text": "4"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_0c8c20b3ec27d197016aae9189c49487d2bf431c24855d5776",
+      "content": {
+        "type": "text",
+        "text": "\n"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_0c8c20b3ec27d197016aae9189c49487d2bf431c24855d5776",
+      "content": {
+        "type": "text",
+        "text": "5"
+      }
+    }
+  },
+  {
+    "type": "turn_ended",
+    "turnId": "turn-1",
+    "stopReason": "end_turn"
+  }
+]

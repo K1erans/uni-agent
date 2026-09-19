@@ -32,7 +32,7 @@ describe('Thread', () => {
     attach(second);
     expect(second).toHaveBeenCalledWith({
       type: 'history',
-      thread: { id: 'thread-1', workspace: 'uni-agent' },
+      thread: { id: 'thread-1', agent: 'claude', workspace: 'uni-agent' },
       events: [
         { event: expect.objectContaining({ type: 'session_started' }), at: expect.any(Number) },
         { event: expect.objectContaining({ type: 'turn_started' }), at: expect.any(Number) },

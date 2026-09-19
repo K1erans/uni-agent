@@ -45,6 +45,11 @@
         "icon": "$(add)"
       },
       {
+        "command": "uniAgent.newThreadWithAgent",
+        "title": "New Thread With Agent…",
+        "category": "Uni Agent"
+      },
+      {
         "command": "uniAgent.showThreadHistory",
         "title": "Thread History",
         "category": "Uni Agent",
@@ -74,6 +79,11 @@
           "group": "navigation@2"
         },
         {
+          "command": "uniAgent.newThreadWithAgent",
+          "when": "view == uniAgent.sidebar",
+          "group": "1_uniAgent@0"
+        },
+        {
           "command": "uniAgent.showLogs",
           "when": "view == uniAgent.sidebar",
           "group": "1_uniAgent@1"
@@ -93,6 +103,18 @@
           "default": "",
           "scope": "machine",
           "markdownDescription": "Path to the `claude` executable. Leave empty to find it on `PATH`. Machine-scoped: workspace settings cannot change which program Uni Agent runs."
+        },
+        "uniAgent.codex.executablePath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "Path to the `codex` executable. Leave empty to find it on `PATH`. Machine-scoped: workspace settings cannot change which program Uni Agent runs."
+        },
+        "uniAgent.cursor.executablePath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "Path to the `agent` executable (Cursor agent CLI). Leave empty to find it on `PATH`. Machine-scoped: workspace settings cannot change which program Uni Agent runs."
         },
         "uniAgent.verboseLogging": {
           "type": "boolean",

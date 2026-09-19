@@ -62,7 +62,7 @@ export function makeThread<R>(
     // posted to a closed webview.
     yield* Effect.addFinalizer(() => Effect.sync(() => (post = undefined)));
 
-    const info: ThreadInfo = { id, workspace: workspace.name };
+    const info: ThreadInfo = { id, agent: adapter.agent, workspace: workspace.name };
     return {
       info,
       workspace,

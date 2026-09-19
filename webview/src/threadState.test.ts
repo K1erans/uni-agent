@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../../src/agents/events';
-import type { ThreadEvent } from '../../src/protocol';
+import type { ThreadEvent, ThreadInfo } from '../../src/protocol';
 import { agentStatus, applyEvent, emptyThread, threadReducer, type ThreadState } from './threadState';
 
 const at = (event: AgentEvent, time = 0): ThreadEvent => ({ event, at: time });
@@ -12,7 +12,7 @@ const chunk = (messageId: string, text: string, kind: 'agent_message_chunk' | 'a
 });
 
 const turnStarted: AgentEvent = { type: 'turn_started', turnId: 't1', prompt: [{ type: 'text', text: 'Count to 3' }] };
-const thread = { id: 'thread-1', workspace: 'uni-agent' };
+const thread: ThreadInfo = { id: 'thread-1', agent: 'claude', workspace: 'uni-agent' };
 const fold = (events: ThreadEvent[]): ThreadState => threadReducer(emptyThread, { type: 'history', thread, events });
 
 describe('threadState', () => {
@@ -30,7 +30,6 @@ describe('threadState', () => {
 
     expect(state).toMatchObject({
       thread,
-      agent: 'claude',
       config: { model: 'claude-opus-5', permissionMode: 'default' },
       running: false,
       items: [
@@ -118,7 +117,7 @@ describe('threadState', () => {
     const withBranch = threadReducer(shown, { type: 'branch', name: 'main' });
     expect(withBranch.branch).toBe('main');
 
-    const switched = threadReducer(withBranch, { type: 'history', thread: { id: 'thread-2', workspace: null }, events: [] });
-    expect(switched).toEqual({ ...emptyThread, thread: { id: 'thread-2', workspace: null } });
+    const switched = threadReducer(withBranch, { type: 'history', thread: { id: 'thread-2', agent: 'claude', workspace: null }, events: [] });
+    expect(switched).toEqual({ ...emptyThread, thread: { id: 'thread-2', agent: 'claude', workspace: null } });
   });
 });

@@ -1,24 +1,24 @@
 import { Effect } from 'effect';
 import type { AgentAdapter, EventSink, MakeAdapter } from '../agents/adapter';
-import type { ContentBlock, StopReason } from '../agents/events';
+import type { AgentKind, ContentBlock, StopReason } from '../agents/events';
 
 /** An adapter for tests whose turns run until the test ends them. */
 export class FakeAdapter implements AgentAdapter {
-  readonly agent = 'claude' as const;
   readonly prompts: ReadonlyArray<ContentBlock>[] = [];
   disposed = false;
 
   constructor(
+    readonly agent: AgentKind,
     readonly sessionId: string,
     private readonly onEvent: EventSink
   ) {}
 
-  /** Builds fake adapters, recording each one in `made`, announcing sessions like real adapters do. */
-  static maker(made: FakeAdapter[]): MakeAdapter<never> {
+  /** Builds fake adapters for `agent`, recording each one in `made`, announcing sessions like Claude's adapter does. */
+  static maker(made: FakeAdapter[], agent: AgentKind = 'claude'): MakeAdapter<never> {
     return (onEvent) =>
       Effect.gen(function* () {
-        const fake = new FakeAdapter(`session-${made.length + 1}`, onEvent);
-        yield* onEvent({ type: 'session_started', agent: 'claude', sessionId: fake.sessionId });
+        const fake = new FakeAdapter(agent, `session-${made.length + 1}`, onEvent);
+        yield* onEvent({ type: 'session_started', agent, sessionId: fake.sessionId });
         yield* Effect.addFinalizer(() => Effect.sync(() => (fake.disposed = true)));
         made.push(fake);
         return fake;

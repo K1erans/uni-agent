@@ -19,7 +19,7 @@ export function ThreadHeading({ state }: ThreadHeadingProps) {
       </h1>
       <p className="thread-meta">
         <span className={`status-dot status-${status}`} role="img" aria-label={`Status: ${STATUS_LABELS[status]}`} title={STATUS_LABELS[status]} />
-        <span className="meta-text meta-agent">{state.agent ? AGENT_NAMES[state.agent] : 'Agent'}</span>
+        <span className="meta-text meta-agent">{state.thread ? AGENT_NAMES[state.thread.agent] : 'Agent'}</span>
         {problem && (
           <>
             <span className="meta-separator" aria-hidden="true">

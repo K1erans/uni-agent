@@ -207,7 +207,7 @@ describe('ClaudeAdapter', () => {
 
     void prompt('hi');
     const second = await Effect.runPromise(Effect.either(adapter.prompt([{ type: 'text', text: 'again' }])));
-    expect(second).toEqual(Either.left(new TurnInProgress({ sessionId: SESSION_ID })));
+    expect(second).toEqual(Either.left(new TurnInProgress({ agent: 'claude' })));
   });
 
   it('ends a running turn as cancelled when disposed', async () => {

@@ -1,7 +1,7 @@
-import type { AgentErrorCode, AgentKind } from '../../src/agents/events';
+import type { AgentErrorCode } from '../../src/agents/events';
 import type { AgentStatus } from './threadState';
 
-export const AGENT_NAMES = { claude: 'Claude Code', codex: 'Codex', cursor: 'Cursor' } satisfies Record<AgentKind, string>;
+export { AGENT_NAMES } from '../../src/agents/events';
 
 export const STATUS_LABELS = {
   ready: 'Ready',

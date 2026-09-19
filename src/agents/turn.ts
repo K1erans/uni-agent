@@ -2,6 +2,9 @@ import { Deferred, Effect } from 'effect';
 import type { EventSink } from './adapter';
 import type { AgentErrorCode, StopReason } from './events';
 
+/** The session updates that stream a piece of the agent's reply or thinking. */
+export type ChunkKind = 'agent_message_chunk' | 'agent_thought_chunk';
+
 /**
  * One prompt turn, from `turn_started` to `turn_ended`. Tags the events it emits with its turn ID
  * and settles the waiting `prompt` when it ends. Adapters extend it with their own per-turn state.
@@ -23,7 +26,7 @@ export class Turn {
   }
 
   /** Streams a piece of the agent's reply or thinking; empty text is dropped. */
-  chunk(sessionUpdate: 'agent_message_chunk' | 'agent_thought_chunk', messageId: string, text: string): Effect.Effect<void> {
+  chunk(sessionUpdate: ChunkKind, messageId: string, text: string): Effect.Effect<void> {
     return text
       ? this.emit({ type: 'session_update', turnId: this.id, update: { sessionUpdate, messageId, content: { type: 'text', text } } })
       : Effect.void;

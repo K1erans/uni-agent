@@ -34,7 +34,7 @@ function setup() {
   const threads = Effect.runSync(
     makeThreads(
       () => ({ cwd: '/work/uni-agent', name: 'uni-agent' }),
-      () => FakeAdapter.maker(made)
+      (agent) => FakeAdapter.maker(made, agent)
     ).pipe(Scope.extend(scope), Effect.provide(services))
   );
   return {
@@ -57,7 +57,7 @@ describe('Threads', () => {
     await run(threads.connect(view.post));
 
     expect(view.types()).toEqual(['history', 'branch']);
-    expect(historyOf(view.messages)).toMatchObject({ thread: { id: 'thread-1', workspace: 'uni-agent' } });
+    expect(historyOf(view.messages)).toMatchObject({ thread: { id: 'thread-1', agent: 'claude', workspace: 'uni-agent' } });
     expect(view.messages[1]).toEqual({ type: 'branch', name: 'main' });
     expect(watching).toEqual(['/work/uni-agent']);
   });
@@ -70,6 +70,21 @@ describe('Threads', () => {
 
     expect(again.info.id).toBe('thread-1');
     expect(threads.list()).toHaveLength(1);
+  });
+
+  it('creates threads with the chosen agent, and new threads keep the shown thread’s agent', async () => {
+    const { threads, run } = setup();
+    const view = webview();
+    await run(threads.connect(view.post));
+
+    const codex = await run(threads.create('codex'));
+    expect(codex.info).toEqual({ id: 'thread-2', agent: 'codex', workspace: 'uni-agent' });
+    expect(historyOf(view.messages)).toMatchObject({ thread: { id: 'thread-2', agent: 'codex' } });
+
+    // The untouched Codex thread is shown again rather than duplicated.
+    expect((await run(threads.create())).info.id).toBe('thread-2');
+    expect((await run(threads.create('cursor'))).info).toMatchObject({ id: 'thread-3', agent: 'cursor' });
+    expect(threads.list().map((thread) => thread.info.agent)).toEqual(['cursor', 'codex', 'claude']);
   });
 
   it('switches threads, forwarding only the shown thread and replaying the one switched back to', async () => {
