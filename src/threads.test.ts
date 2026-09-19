@@ -131,6 +131,18 @@ describe('Threads', () => {
     expect(fresh.messages.at(-1)).toMatchObject({ type: 'event', threadId: 'thread-1', event: { type: 'turn_started' } });
   });
 
+  it('ignores a connection that was still queued when its webview closed', async () => {
+    const { threads, run, watching } = setup();
+    const closed = webview();
+
+    // VS Code disposed the view before its `ready` message was handled.
+    await run(threads.disconnect(closed.post));
+    await run(threads.connect(closed.post));
+
+    expect(closed.messages).toEqual([]);
+    expect(watching).toEqual([]);
+  });
+
   it('sends prompts to the thread they name, and ignores unknown threads', async () => {
     const { threads, made, run } = setup();
     await run(threads.connect(webview().post));

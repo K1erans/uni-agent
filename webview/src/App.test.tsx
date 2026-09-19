@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '../../src/agents/events';
 import type { ExtensionMessage, ThreadInfo } from '../../src/protocol';
-import { App } from './App';
+import { App, type Drafts } from './App';
 import type { TurnItem } from './threadState';
 import { Transcript } from './Transcript';
 
@@ -184,16 +184,28 @@ describe('App', () => {
     expect(post).toHaveBeenCalledWith({ type: 'prompt', threadId: 'thread-2', text: 'Second thread' });
   });
 
-  it('keeps the unsent draft for when the sidebar is shown again', () => {
-    let saved = 'Half-written';
-    const drafts = { load: () => saved, save: (draft: string) => void (saved = draft) };
-    const { unmount } = render(<App post={() => {}} drafts={drafts} />);
+  it('keeps each thread’s unsent draft, including while the sidebar is hidden', () => {
+    let saved: Drafts = new Map([['thread-1', 'Half-written']]);
+    const drafts = { load: () => saved, save: (next: Drafts) => void (saved = next) };
+    const post = vi.fn();
+    const { unmount } = render(<App post={post} drafts={drafts} />);
+    open();
     expect(input().value).toBe('Half-written');
-
     type('Half-written prompt');
+
+    // Another thread starts with its own, empty draft; the first thread's is not sent there.
+    open([], { id: 'thread-2', workspace: 'uni-agent' });
+    expect(input().value).toBe('');
+    fireEvent.keyDown(input(), { key: 'Enter' });
+    expect(post).not.toHaveBeenCalled();
+    type('For the second thread');
+
     unmount();
-    render(<App post={() => {}} drafts={drafts} />);
+    render(<App post={post} drafts={drafts} />);
+    open();
     expect(input().value).toBe('Half-written prompt');
+    open([], { id: 'thread-2', workspace: 'uni-agent' });
+    expect(input().value).toBe('For the second thread');
   });
 
   it('ignores messages that do not match the protocol', () => {

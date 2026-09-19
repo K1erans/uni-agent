@@ -14,13 +14,13 @@ declare function acquireVsCodeApi(): VsCodeApi;
 /** The webview's handle to the extension. `acquireVsCodeApi` may only be called once per page. */
 export const vscode = acquireVsCodeApi();
 
-/** What the webview keeps while VS Code disposes it (the sidebar hidden): the unsent draft. */
-const WebviewState = Schema.Struct({ draft: Schema.String });
+/** What the webview keeps while VS Code disposes it (the sidebar hidden): unsent drafts by thread. */
+const WebviewState = Schema.Struct({ drafts: Schema.Array(Schema.Tuple(Schema.String, Schema.String)) });
 type WebviewState = typeof WebviewState.Type;
 
 const decodeState = Schema.decodeUnknownOption(WebviewState);
 
 export const draftStore: DraftStore = {
-  load: () => Option.match(decodeState(vscode.getState()), { onNone: () => '', onSome: (state) => state.draft }),
-  save: (draft) => vscode.setState({ draft }),
+  load: () => Option.match(decodeState(vscode.getState()), { onNone: () => new Map(), onSome: (state) => new Map(state.drafts) }),
+  save: (drafts) => vscode.setState({ drafts: [...drafts] }),
 };

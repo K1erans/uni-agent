@@ -9,10 +9,13 @@ import { Transcript } from './Transcript';
 
 const decodeExtensionMessage = Schema.decodeUnknownOption(ExtensionMessage);
 
-/** Keeps the unsent draft while VS Code disposes the webview, which it does whenever the sidebar is hidden. */
+/** Unsent drafts by thread ID. */
+export type Drafts = ReadonlyMap<string, string>;
+
+/** Keeps unsent drafts while VS Code disposes the webview, which it does whenever the sidebar is hidden. */
 export interface DraftStore {
-  load(): string;
-  save(draft: string): void;
+  load(): Drafts;
+  save(drafts: Drafts): void;
 }
 
 interface AppProps {
@@ -22,7 +25,15 @@ interface AppProps {
 
 export function App({ post, drafts }: AppProps) {
   const [state, dispatch] = useReducer(threadReducer, emptyThread);
-  const [draft, setDraft] = useState(() => drafts?.load() ?? '');
+  // Each thread keeps its own draft, so switching thread never sends one thread's draft to another.
+  const [draftsByThread, setDraftsByThread] = useState<Drafts>(() => drafts?.load() ?? new Map());
+  const threadId = state.thread?.id;
+  const draft = threadId === undefined ? '' : (draftsByThread.get(threadId) ?? '');
+  const setDraft = (text: string) => {
+    if (threadId !== undefined) {
+      setDraftsByThread((previous) => withDraft(previous, threadId, text));
+    }
+  };
   // Read by the stable callbacks below, so memoised turns do not re-render when these change.
   const latest = useRef(state);
   latest.current = state;
@@ -33,7 +44,7 @@ export function App({ post, drafts }: AppProps) {
     return () => window.removeEventListener('message', onMessage);
   }, []);
 
-  useEffect(() => drafts?.save(draft), [drafts, draft]);
+  useEffect(() => drafts?.save(draftsByThread), [drafts, draftsByThread]);
 
   /** Posts a prompt to the shown thread, unless a turn is running or no thread is shown yet. */
   const sendPrompt = useCallback(
@@ -71,4 +82,14 @@ export function App({ post, drafts }: AppProps) {
       />
     </main>
   );
+}
+
+function withDraft(drafts: Drafts, threadId: string, text: string): Drafts {
+  const next = new Map(drafts);
+  if (text) {
+    next.set(threadId, text);
+  } else {
+    next.delete(threadId);
+  }
+  return next;
 }

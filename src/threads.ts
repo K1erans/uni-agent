@@ -16,9 +16,12 @@ export interface Threads {
   readonly current: Thread | undefined;
   /** Every thread, newest first. */
   list(): ReadonlyArray<Thread>;
-  /** Connects the sidebar webview and shows it the current thread, creating one if there is none. */
+  /**
+   * Connects the sidebar webview and shows it the current thread, creating one if there is none.
+   * Ignored for a webview already disconnected, whose connection was still queued when it closed.
+   */
   connect(post: Post): Effect.Effect<void>;
-  /** Disconnects the webview, if `post` is still the connected one. */
+  /** Disconnects the webview, if `post` is still the connected one, and stops it connecting again. */
   disconnect(post: Post): Effect.Effect<void>;
   /** Shows a new thread. A current thread nobody has prompted yet is shown again instead. */
   create(): Effect.Effect<Thread>;
@@ -49,6 +52,9 @@ export function makeThreads<R>(
     const threads: Thread[] = [];
     let current: Thread | undefined;
     let connected: Post | undefined;
+    // Webviews VS Code has disposed. Checked under the lock, so a connection queued behind the
+    // disconnect cannot attach a closed webview.
+    const disconnected = new WeakSet<Post>();
     // Watches the shown thread's branch while a webview is connected.
     let branchWatch: Scope.CloseableScope | undefined;
 
@@ -103,6 +109,9 @@ export function makeThreads<R>(
       connect: (post) =>
         serial(
           Effect.suspend(() => {
+            if (disconnected.has(post)) {
+              return Effect.void;
+            }
             connected = post;
             return current ? show(current) : Effect.asVoid(create);
           })
@@ -110,6 +119,7 @@ export function makeThreads<R>(
       disconnect: (post) =>
         serial(
           Effect.suspend(() => {
+            disconnected.add(post);
             if (connected !== post) {
               return Effect.void;
             }
