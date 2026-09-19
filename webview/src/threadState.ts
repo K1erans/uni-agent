@@ -1,4 +1,4 @@
-import type { AgentErrorCode, AgentKind, StopReason } from '../../src/agents/events';
+import type { AgentErrorCode, StopReason } from '../../src/agents/events';
 import type { ExtensionMessage, ThreadEvent, ThreadInfo } from '../../src/protocol';
 
 export interface ErrorItem {
@@ -38,9 +38,8 @@ export interface SessionConfig {
 }
 
 export interface ThreadState {
-  /** The thread shown; undefined until the extension sends one. */
+  /** The thread shown, including the agent it talks to; undefined until the extension sends one. */
   thread: ThreadInfo | undefined;
-  agent: AgentKind | undefined;
   /** What the agent last reported running the session with; undefined until its process starts. */
   config: SessionConfig | undefined;
   /** The branch checked out in the thread's workspace, if known. */
@@ -54,7 +53,6 @@ export interface ThreadState {
 
 export const emptyThread: ThreadState = {
   thread: undefined,
-  agent: undefined,
   config: undefined,
   branch: null,
   items: [],
@@ -90,8 +88,6 @@ export function threadReducer(state: ThreadState, action: ThreadAction): ThreadS
  */
 export function applyEvent(state: ThreadState, { event, at }: ThreadEvent): ThreadState {
   switch (event.type) {
-    case 'session_started':
-      return { ...state, agent: event.agent };
     case 'session_configured':
       return { ...state, config: { model: event.model, permissionMode: event.permissionMode } };
     case 'turn_started': {

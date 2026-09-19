@@ -4,6 +4,20 @@
 
 ### Added
 
+- Codex threads: `codex app-server` over JSON-RPC stdio, streaming agent messages and reasoning
+  summaries through Codex's started → delta → completed item lifecycle. Signed-out Codex is
+  detected up front with `account/read`.
+- Cursor threads: the Cursor agent CLI as an ACP server (`agent acp`); session updates stream
+  into the thread, and requests outside what Uni Agent supports (including Cursor's extension
+  methods) are declined with "method not found".
+- **Uni Agent: New Thread With Agent…** command, a temporary agent selector; **New Thread**
+  keeps the shown thread's agent. Threads carry their agent in `ThreadInfo`.
+- `uniAgent.codex.executablePath` and `uniAgent.cursor.executablePath` machine-scoped settings.
+- A shared JSON-RPC-over-stdio transport (`Stdio` service, `JsonRpcConnection`) with schema
+  decoding on arrival: malformed traffic ends the connection as a `process_crashed` error. A
+  crashed Codex or Cursor process is restarted on the next prompt and resumes its session.
+- Golden tests over recorded Codex and Cursor fixtures, re-recorded by `npm run test:live`.
+
 - Uni Agent sidebar (a webview view in the activity-bar container) after the Paper design:
   thread heading with the agent's status and workspace; right-aligned prompts, collapsible
   thinking with the turn's duration, replies and inline error cards; Copy and Retry; and a
@@ -37,6 +51,9 @@
 - `engines.vscode` raised to `^1.101.0`, the first release whose Node provides
   `node:sqlite` unflagged.
 - `extensionKind` set to `workspace`.
+- Agents that assign their own session IDs announce `session_started` once the first turn has
+  created the session, so `AgentAdapter` no longer exposes a `sessionId`. The webview reads the
+  thread's agent from `ThreadInfo`. Adapters share `BaseAdapter`.
 
 ### Removed
 

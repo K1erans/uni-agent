@@ -1,0 +1,63 @@
+[
+  {
+    "type": "turn_started",
+    "turnId": "turn-1",
+    "prompt": [
+      {
+        "type": "text",
+        "text": "Count from 1 to 5, one number per line. Reply with nothing else."
+      }
+    ]
+  },
+  {
+    "type": "session_started",
+    "agent": "cursor",
+    "sessionId": "cea7b8d0-3cfd-49b3-bd6b-da84ec892ad9"
+  },
+  {
+    "type": "session_configured",
+    "model": "grok-4.6",
+    "permissionMode": "agent"
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_thought_chunk",
+      "messageId": "turn-1:1",
+      "content": {
+        "type": "text",
+        "text": "Counting from 1 to 5,"
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_thought_chunk",
+      "messageId": "turn-1:1",
+      "content": {
+        "type": "text",
+        "text": " one number per line."
+      }
+    }
+  },
+  {
+    "type": "session_update",
+    "turnId": "turn-1",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "turn-1:2",
+      "content": {
+        "type": "text",
+        "text": "1\n2\n3\n4\n5"
+      }
+    }
+  },
+  {
+    "type": "turn_ended",
+    "turnId": "turn-1",
+    "stopReason": "end_turn"
+  }
+]

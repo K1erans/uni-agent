@@ -1,0 +1,23 @@
+[
+  {
+    "type": "turn_started",
+    "turnId": "turn-1",
+    "prompt": [
+      {
+        "type": "text",
+        "text": "Say hello."
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "turnId": "turn-1",
+    "code": "not_signed_in",
+    "message": "Codex is not signed in. Run `codex login` in a terminal, sign in, then try again."
+  },
+  {
+    "type": "turn_ended",
+    "turnId": "turn-1",
+    "stopReason": "error"
+  }
+]

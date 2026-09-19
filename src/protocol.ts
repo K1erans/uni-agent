@@ -1,5 +1,5 @@
 import { Schema } from 'effect';
-import { AgentEvent } from './agents/events';
+import { AgentEvent, AgentKind } from './agents/events';
 
 /** Messages the sidebar webview posts to the extension. Shared by both bundles. */
 export const WebviewMessage = Schema.Union(
@@ -16,6 +16,8 @@ export type ThreadEvent = typeof ThreadEvent.Type;
 
 export const ThreadInfo = Schema.Struct({
   id: Schema.String,
+  /** The agent the thread talks to, fixed for its lifetime. */
+  agent: AgentKind,
   /** Name of the workspace folder the agent runs in; null when no folder is open. */
   workspace: Schema.NullOr(Schema.String),
 });

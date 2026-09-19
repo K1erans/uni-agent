@@ -1,9 +1,13 @@
 import * as os from 'node:os';
 import { Effect, Exit, Layer, Runtime, Schema, Scope } from 'effect';
 import * as vscode from 'vscode';
-import type { MakeAdapter } from './agents/adapter';
+import type { AdapterOptions, AgentAdapter, MakeAdapter } from './agents/adapter';
 import { ClaudeAdapter, ClaudeSdk } from './agents/claude/claudeAdapter';
+import { CodexAdapter } from './agents/codex/codexAdapter';
+import { CursorAdapter } from './agents/cursor/cursorAdapter';
+import { AGENT_NAMES, AgentKind } from './agents/events';
 import { Executables } from './agents/findExecutable';
+import { Stdio } from './agents/stdio';
 import type { UniAgentApi } from './api';
 import type { Branches } from './branches';
 import { disposable } from './disposable';
@@ -16,7 +20,13 @@ import { registerSidebar, SIDEBAR_VIEW_ID } from './sidebar';
 import type { Workspace } from './thread';
 import { makeThreads, type Threads } from './threads';
 
-const COMMANDS = ['uniAgent.newThread', 'uniAgent.showThreadHistory', 'uniAgent.showLogs', 'uniAgent.openSettings'] as const;
+const COMMANDS = [
+  'uniAgent.newThread',
+  'uniAgent.newThreadWithAgent',
+  'uniAgent.showThreadHistory',
+  'uniAgent.showLogs',
+  'uniAgent.openSettings',
+] as const;
 
 /**
  * Everything the extension acquires lives in one scope, closed when VS Code disposes the
@@ -33,7 +43,7 @@ function start(extensionUri: vscode.Uri): Effect.Effect<UniAgentApi | undefined,
   return Effect.gen(function* () {
     const channel = yield* disposable(() => vscode.window.createOutputChannel('Uni Agent', { log: true }));
     const runtime = yield* Layer.toRuntime(
-      Layer.mergeAll(outputChannelLogger(channel), ClaudeSdk.live, Executables.live, Ids.live, gitBranchesLive)
+      Layer.mergeAll(outputChannelLogger(channel), ClaudeSdk.live, Stdio.live, Executables.live, Ids.live, gitBranchesLive)
     );
     return yield* startServices(extensionUri, channel).pipe(Effect.provide(runtime));
   });
@@ -60,12 +70,13 @@ function startServices(
     yield* Effect.logInfo('Uni Agent activated');
 
     const run = Runtime.runFork(yield* Effect.runtime<never>());
-    const threads = yield* makeThreads(currentWorkspace, makeClaudeAdapter);
+    const threads = yield* makeThreads(currentWorkspace, makeAdapter);
     const webviewReady = yield* disposable(() => new vscode.EventEmitter<vscode.WebviewView>());
     yield* registerSidebar(extensionUri, threads, (view) => webviewReady.fire(view));
 
     const commands = {
       'uniAgent.newThread': () => run(Effect.zipRight(threads.create(), revealSidebar)),
+      'uniAgent.newThreadWithAgent': () => run(pickAgent(threads)),
       'uniAgent.showThreadHistory': () => run(pickThread(threads)),
       'uniAgent.showLogs': () => channel.show(),
       'uniAgent.openSettings': () => void vscode.commands.executeCommand('workbench.action.openSettings', '@ext:uni-agent.uni-agent'),
@@ -78,7 +89,7 @@ function startServices(
   });
 }
 
-type Services = ClaudeSdk | Executables | Ids | Branches;
+type Services = ClaudeSdk | Stdio | Executables | Ids | Branches;
 
 const revealSidebar = Effect.promise(async () => vscode.commands.executeCommand(`${SIDEBAR_VIEW_ID}.focus`));
 
@@ -89,7 +100,7 @@ function pickThread(threads: Threads): Effect.Effect<void> {
     const items = threads.list().map((thread) => ({
       label: thread.title ?? 'New thread',
       description: thread === current ? 'Current' : undefined,
-      detail: thread.workspace.name ?? 'No folder open',
+      detail: `${AGENT_NAMES[thread.info.agent]} · ${thread.workspace.name ?? 'No folder open'}`,
       threadId: thread.info.id,
     }));
     const picked = yield* Effect.promise(async () =>
@@ -102,20 +113,41 @@ function pickThread(threads: Threads): Effect.Effect<void> {
   });
 }
 
+/** Starts a thread with the agent the user picks; a stand-in until the agent picker lands. */
+function pickAgent(threads: Threads): Effect.Effect<void> {
+  return Effect.gen(function* () {
+    const shown = threads.current?.info.agent;
+    const items = AgentKind.literals.map((agent) => ({
+      label: AGENT_NAMES[agent],
+      description: agent === shown ? 'Current' : undefined,
+      agent,
+    }));
+    const picked = yield* Effect.promise(async () =>
+      vscode.window.showQuickPick(items, { title: 'New Thread With Agent', placeHolder: 'Choose the agent the new thread talks to' })
+    );
+    if (picked) {
+      yield* threads.create(picked.agent);
+      yield* revealSidebar;
+    }
+  });
+}
+
 /** Multi-root folder choice arrives with persistence; until then threads run in the first folder. */
 function currentWorkspace(): Workspace {
   const folder = vscode.workspace.workspaceFolders?.[0];
   return folder ? { cwd: folder.uri.fsPath, name: folder.name } : { cwd: os.homedir(), name: null };
 }
 
-/** Every thread talks to Claude until the agent picker lands. */
-function makeClaudeAdapter(workspace: Workspace): MakeAdapter<ClaudeSdk | Executables | Ids> {
+const ADAPTERS = {
+  claude: ClaudeAdapter.make,
+  codex: CodexAdapter.make,
+  cursor: CursorAdapter.make,
+} satisfies Record<AgentKind, (options: AdapterOptions) => Effect.Effect<AgentAdapter, never, Services | Scope.Scope>>;
+
+/** Each agent's CLI is found through its own machine-scoped `uniAgent.<agent>.executablePath` setting. */
+function makeAdapter(agent: AgentKind, workspace: Workspace): MakeAdapter<Services> {
   return (onEvent) =>
-    ClaudeAdapter.make({
-      cwd: workspace.cwd,
-      executablePath: readSetting('claude.executablePath', Schema.NonEmptyString),
-      onEvent,
-    });
+    ADAPTERS[agent]({ cwd: workspace.cwd, executablePath: readSetting(`${agent}.executablePath`, Schema.NonEmptyString), onEvent });
 }
 
 export function deactivate(): void {

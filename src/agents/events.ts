@@ -13,6 +13,8 @@ import { Schema } from 'effect';
 export const AgentKind = Schema.Literal('claude', 'codex', 'cursor');
 export type AgentKind = typeof AgentKind.Type;
 
+export const AGENT_NAMES = { claude: 'Claude Code', codex: 'Codex', cursor: 'Cursor' } satisfies Record<AgentKind, string>;
+
 export const ContentBlock = Schema.Struct({ type: Schema.Literal('text'), text: Schema.String });
 export type ContentBlock = typeof ContentBlock.Type;
 
@@ -94,7 +96,9 @@ export const AgentErrorCode = Schema.Literal('binary_missing', 'not_signed_in', 
 export type AgentErrorCode = typeof AgentErrorCode.Type;
 
 export const AgentEvent = Schema.Union(
-  // The native session exists (or is reserved) and can be resumed by `sessionId`.
+  // The native session exists (or is reserved) and can be resumed by `sessionId`. Agents that take
+  // the ID from the client (Claude) announce it up front; agents that assign their own (Codex,
+  // Cursor) announce it once the first turn has created the session.
   Schema.Struct({ type: Schema.Literal('session_started'), agent: AgentKind, sessionId: Schema.String }),
   // The model and permission mode the agent runs the session with, as it reports them. Sent again
   // whenever the agent (re)starts, so the latest one is current. Modes are the agent's own names.

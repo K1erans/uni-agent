@@ -1,5 +1,5 @@
-import { Data, type Effect, type Scope } from 'effect';
-import type { AgentEvent, AgentKind, ContentBlock, StopReason } from './events';
+import { Data, Option, type Effect, type Scope } from 'effect';
+import { AGENT_NAMES, type AgentEvent, type AgentKind, type ContentBlock, type StopReason } from './events';
 
 /**
  * Drives one native agent session and translates its traffic into {@link AgentEvent}s. A thread
@@ -8,8 +8,6 @@ import type { AgentEvent, AgentKind, ContentBlock, StopReason } from './events';
  */
 export interface AgentAdapter {
   readonly agent: AgentKind;
-  /** The native session ID, known from construction onwards. */
-  readonly sessionId: string;
 
   /** Runs one prompt turn; succeeds with why the turn ended. */
   prompt(prompt: ReadonlyArray<ContentBlock>): Effect.Effect<StopReason, TurnInProgress>;
@@ -22,11 +20,35 @@ export interface AgentAdapter {
 export type EventSink = (event: AgentEvent) => Effect.Effect<void>;
 
 /**
- * Builds an adapter for a new session. Before returning, the adapter announces the session through
- * the sink and checks the agent can run. Closing the scope stops the agent process and ends a
+ * Builds an adapter for a new session. Before returning, the adapter checks the agent can run and
+ * reports through the sink if it cannot. Closing the scope stops the agent process and ends a
  * running turn as `cancelled`.
  */
 export type MakeAdapter<R> = (onEvent: EventSink) => Effect.Effect<AgentAdapter, never, R | Scope.Scope>;
 
+/** What every adapter is built with. */
+export interface AdapterOptions {
+  /** The thread's working directory. */
+  readonly cwd: string;
+  /** The agent's `uniAgent.<agent>.executablePath` setting; none means search PATH for its CLI. */
+  readonly executablePath: Option.Option<string>;
+  readonly onEvent: EventSink;
+}
+
 /** A prompt arrived while the session was still running a turn. */
-export class TurnInProgress extends Data.TaggedError('TurnInProgress')<{ readonly sessionId: string }> {}
+export class TurnInProgress extends Data.TaggedError('TurnInProgress')<{ readonly agent: AgentKind }> {}
+
+/** Explains that an agent's CLI (`command`) could not be found, naming the setting that locates it. */
+export function binaryMissingMessage(agent: AgentKind, command: string, executablePath: Option.Option<string>): string {
+  const name = AGENT_NAMES[agent];
+  const setting = `uniAgent.${agent}.executablePath`;
+  return Option.match(executablePath, {
+    onSome: (path) => `${name} was not found at "${path}", the path set in ${setting}.`,
+    onNone: () => `${name} ("${command}") was not found on PATH. Install ${name}, or set ${setting} to its location.`,
+  });
+}
+
+/** Explains that an agent's CLI is not signed in; `login` is the command that signs it in. */
+export function notSignedInMessage(agent: AgentKind, login: string, detail = ''): string {
+  return `${AGENT_NAMES[agent]} is not signed in. Run \`${login}\` in a terminal, sign in, then try again.` + (detail ? `\n\n${detail}` : '');
+}

@@ -6,7 +6,7 @@ import { Data, Effect, type ParseResult, Option, Schema, Stream } from 'effect';
 /** A message in the agent's own wire format, as JSON. */
 export type WireMessage = string | number | boolean | null | readonly WireMessage[] | { readonly [key: string]: WireMessage };
 
-const WireMessage: Schema.Schema<WireMessage> = Schema.Union(
+export const WireMessage: Schema.Schema<WireMessage> = Schema.Union(
   Schema.String,
   Schema.Number,
   Schema.Boolean,
