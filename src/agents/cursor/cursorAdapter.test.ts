@@ -1,6 +1,8 @@
-import { Effect } from 'effect';
+import { Effect, Either } from 'effect';
 import { describe, expect, it, vi } from 'vitest';
-import { agentRequest, answer, exit, methodNotFound, notification, notify, request, result, setupAdapter } from '../../testing/stdioFixtures';
+import { modeSettings } from '../../testing/modeSettings';
+import { agentRequest, answer, exit, methodNotFound, notification, notify, request, result, rpcError, setupAdapter } from '../../testing/stdioFixtures';
+import { ModeChangeFailed } from '../adapter';
 import { CLIENT_INFO } from '../jsonRpcAdapter';
 import type { TrafficLine, WireMessage } from '../traffic';
 import { CursorAdapter } from './cursorAdapter';
@@ -269,5 +271,166 @@ describe('CursorAdapter', () => {
     await setup.dispose();
     expect(await turn).toBe('cancelled');
     expect(setup.errors()).toEqual([]);
+  });
+
+  describe('modes', () => {
+    /** Starts a session whose agent offers `available` and runs in `agent` mode, taking request IDs 1 and 2. */
+    const offering = (...available: string[]): TrafficLine[] => [
+      ...initialize,
+      request(2, 'session/new', { cwd: '/workspace', mcpServers: [] }),
+      result(2, { sessionId: SESSION, ...SESSION_CONFIG, modes: { currentModeId: 'agent', availableModes: available.map((id) => ({ id, name: id })) } }),
+    ];
+    const setMode = (id: number, modeId: string): TrafficLine[] => [request(id, 'session/set_mode', { sessionId: SESSION, modeId }), result(id, {})];
+
+    it('switches a new session to the mode it maps to before the first prompt', async () => {
+      const setup = setupAdapter(
+        CursorAdapter.make,
+        [[...offering('agent', 'plan', 'ask'), ...setMode(3, 'plan'), prompt(4, 'look'), result(4, { stopReason: 'end_turn' })]],
+        undefined,
+        undefined,
+        { mode: 'plan' }
+      );
+
+      expect(await setup.prompt('look')).toBe('end_turn');
+      expect(setup.events).toContainEqual({ type: 'session_configured', model: 'GPT-6', permissionMode: 'plan' });
+    });
+
+    it('leaves a session already in the mode it maps to as it is', async () => {
+      const setup = setupAdapter(CursorAdapter.make, [[...offering('agent', 'plan'), prompt(3, 'hi'), result(3, { stopReason: 'end_turn' })]]);
+
+      expect(await setup.prompt('hi')).toBe('end_turn');
+      expect(setup.errors()).toEqual([]);
+    });
+
+    it('switches the open session straight away when the mode changes', async () => {
+      const setup = setupAdapter(CursorAdapter.make, [
+        [...offering('agent', 'plan'), prompt(3, 'hi'), result(3, { stopReason: 'end_turn' }), ...setMode(4, 'plan'), prompt(5, 'look'), result(5, { stopReason: 'end_turn' })],
+      ]);
+
+      expect(await setup.prompt('hi')).toBe('end_turn');
+      await Effect.runPromise(setup.adapter.setMode('plan'));
+      expect(await setup.prompt('look')).toBe('end_turn');
+      expect(setup.errors()).toEqual([]);
+    });
+
+    it('fails, keeping its mode, when Cursor refuses to switch the open session', async () => {
+      const setup = setupAdapter(CursorAdapter.make, [
+        [
+          ...offering('agent', 'plan'),
+          prompt(3, 'hi'),
+          result(3, { stopReason: 'end_turn' }),
+          request(4, 'session/set_mode', { sessionId: SESSION, modeId: 'plan' }),
+          rpcError(4, -32603, 'Cannot switch mode now'),
+          prompt(5, 'again'),
+          result(5, { stopReason: 'end_turn' }),
+        ],
+      ]);
+      expect(await setup.prompt('hi')).toBe('end_turn');
+
+      const refused = await Effect.runPromise(Effect.either(setup.adapter.setMode('plan')));
+
+      expect(refused).toEqual(Either.left(new ModeChangeFailed({ agent: 'cursor', mode: 'plan', reason: 'Cannot switch mode now' })));
+      // Still in Auto-edit, so the next prompt runs in the agent session mode it already has.
+      expect(await setup.prompt('again')).toBe('end_turn');
+    });
+
+    it('ignores an override that would give a mode more freedom than its built-in setting', async () => {
+      const setup = setupAdapter(
+        CursorAdapter.make,
+        [[...offering('agent', 'plan'), ...setMode(3, 'plan'), prompt(4, 'look'), result(4, { stopReason: 'end_turn' })]],
+        undefined,
+        undefined,
+        { mode: 'plan', settings: modeSettings({ cursor: { plan: 'agent' } }) }
+      );
+
+      expect(await setup.prompt('look')).toBe('end_turn');
+    });
+
+    it('runs in the nearest more restrictive mode when the agent does not offer the one wanted', async () => {
+      const setup = setupAdapter(
+        CursorAdapter.make,
+        [[...offering('agent', 'ask'), ...setMode(3, 'ask'), prompt(4, 'look'), result(4, { stopReason: 'end_turn' })]],
+        undefined,
+        undefined,
+        { mode: 'plan' }
+      );
+
+      expect(await setup.prompt('look')).toBe('end_turn');
+      expect(setup.errors()).toEqual([]);
+    });
+
+    it('fails the turn rather than run with more freedom when no restrictive enough mode is offered', async () => {
+      const setup = setupAdapter(CursorAdapter.make, [[...offering('agent')]], undefined, undefined, { mode: 'plan' });
+
+      expect(await setup.prompt('look')).toBe('error');
+      expect(setup.errors()).toEqual([expect.objectContaining({ code: 'agent_error', message: expect.stringContaining('Plan') })]);
+    });
+
+    it('uses the session mode the modeOverrides setting names, and ignores an invalid setting', async () => {
+      const overridden = setupAdapter(
+        CursorAdapter.make,
+        [[...offering('agent', 'plan', 'ask'), ...setMode(3, 'ask'), prompt(4, 'hi'), result(4, { stopReason: 'end_turn' })]],
+        undefined,
+        undefined,
+        { settings: modeSettings({ cursor: { auto_edit: 'ask' } }) }
+      );
+      expect(await overridden.prompt('hi')).toBe('end_turn');
+
+      const invalid = setupAdapter(
+        CursorAdapter.make,
+        [[...offering('agent', 'plan', 'ask'), prompt(3, 'hi'), result(3, { stopReason: 'end_turn' })]],
+        undefined,
+        undefined,
+        { settings: modeSettings({ cursor: { auto_edit: 42 } }) }
+      );
+      expect(await invalid.prompt('hi')).toBe('end_turn');
+      expect([...overridden.errors(), ...invalid.errors()]).toEqual([]);
+    });
+
+    it('allows every permission request in Full auto without asking the user', async () => {
+      const setup = setupAdapter(
+        CursorAdapter.make,
+        [
+          [
+            ...handshake,
+            prompt(3, 'list them'),
+            update({ sessionUpdate: 'tool_call', ...TOOL_CALL }),
+            agentRequest(8, 'session/request_permission', { sessionId: SESSION, toolCall: { toolCallId: 'call_1' }, options: PERMISSION_OPTIONS }),
+            answer(8, { outcome: { outcome: 'selected', optionId: 'proceed_once' } }),
+            update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_1', status: 'completed' }),
+            result(3, { stopReason: 'end_turn' }),
+          ],
+        ],
+        undefined,
+        undefined,
+        { mode: 'full_auto' }
+      );
+
+      expect(await setup.prompt('list them')).toBe('end_turn');
+      expect(setup.events.map((event) => event.type)).not.toContain('permission_request');
+    });
+
+    it('asks the user in Full auto when the agent offers no allow-once option, rather than always allow', async () => {
+      const options = PERMISSION_OPTIONS.filter((option) => option.kind !== 'allow_once');
+      const setup = setupAdapter(
+        CursorAdapter.make,
+        [
+          [
+            ...handshake,
+            prompt(3, 'list them'),
+            update({ sessionUpdate: 'tool_call', ...TOOL_CALL }),
+            agentRequest(8, 'session/request_permission', { sessionId: SESSION, toolCall: { toolCallId: 'call_1' }, options }),
+            answer(8, { outcome: { outcome: 'selected', optionId: 'reject_once' } }),
+            result(3, { stopReason: 'end_turn' }),
+          ],
+        ],
+        undefined,
+        () => 'reject_once',
+        { mode: 'full_auto' }
+      );
+
+      expect(await setup.prompt('list them')).toBe('end_turn');
+      expect(setup.events.find((event) => event.type === 'permission_request')).toMatchObject({ options });
+    });
   });
 });

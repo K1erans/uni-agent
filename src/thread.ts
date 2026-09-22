@@ -1,5 +1,6 @@
 import { Clock, Effect, type Scope } from 'effect';
 import type { MakeAdapter } from './agents/adapter';
+import { AGENT_NAMES, DEFAULT_MODE, MODE_NAMES, type Mode } from './agents/events';
 import { threadTitle, type ExtensionMessage, type ThreadEvent, type ThreadInfo } from './protocol';
 
 /** Where a thread's agent runs. */
@@ -27,6 +28,8 @@ export interface Thread {
   readonly isEmpty: boolean;
   /** Whether the agent is waiting for the user to answer a permission request. */
   readonly needsApproval: boolean;
+  /** How freely the agent may act; new threads start in {@link DEFAULT_MODE}. */
+  readonly mode: Mode;
   /** Connects a webview, replacing any previous one, and sends it the history so far. */
   attach(post: Post): Effect.Effect<void>;
   /** Stops forwarding events to the connected webview. */
@@ -35,6 +38,11 @@ export interface Thread {
   prompt(text: string): Effect.Effect<void>;
   /** Answers a permission request the agent is waiting on; an answer it cannot place is logged and dropped. */
   respond(requestId: string, optionId: string): Effect.Effect<void>;
+  /**
+   * Switches the thread's mode, including mid-turn, and tells the connected webview. If the agent
+   * refuses, the thread keeps its mode and logs why. Checking Full auto is allowed is the caller's job.
+   */
+  setMode(mode: Mode): Effect.Effect<void>;
 }
 
 /**
@@ -70,6 +78,10 @@ export function makeThread<R>(
     let running = false;
     let prompted = false;
     let title: string | undefined;
+    let mode = DEFAULT_MODE;
+    // Mode changes arrive on fibers of their own; one at a time keeps the mode shown in step with
+    // the one the agent runs in.
+    const modeLock = yield* Effect.makeSemaphore(1);
 
     const adapter = yield* makeAdapter((event) =>
       Effect.flatMap(Clock.currentTimeMillis, (at) => {
@@ -81,7 +93,8 @@ export function makeThread<R>(
         }
         history.push({ event, at });
         return Effect.zipRight(post ? post({ type: 'event', threadId: id, event, at }) : Effect.void, onChanged());
-      })
+      }),
+      mode
     );
     // Finalizers run in reverse, so this runs before the adapter stops and its last events are not
     // posted to a closed webview.
@@ -100,10 +113,13 @@ export function makeThread<R>(
       get needsApproval() {
         return openApprovals(history).size > 0;
       },
+      get mode() {
+        return mode;
+      },
       attach: (next) =>
         Effect.suspend(() => {
           post = next;
-          return next({ type: 'history', thread: info, events: [...history] });
+          return next({ type: 'history', thread: info, mode, events: [...history] });
         }),
       detach: () => Effect.sync(() => (post = undefined)),
       prompt: (text) =>
@@ -127,6 +143,22 @@ export function makeThread<R>(
         // nothing to act on, and never a reason to break the thread.
         Effect.catchTag(adapter.respond(requestId, optionId), 'UnknownPermissionRequest', (error) =>
           Effect.logDebug(`Ignored an answer for permission request ${error.requestId} of thread ${id}`)
+        ),
+      setMode: (next) =>
+        modeLock.withPermits(1)(
+          adapter.setMode(next).pipe(
+            // Only a switch the agent accepted is shown: the webview must never show a stricter mode
+            // than the agent really runs in.
+            Effect.zipRight(
+              Effect.suspend(() => {
+                mode = next;
+                return post ? post({ type: 'mode', threadId: id, mode: next }) : Effect.void;
+              })
+            ),
+            Effect.catchTag('ModeChangeFailed', (error) =>
+              Effect.logWarning(`${AGENT_NAMES[error.agent]} refused to switch thread ${id} to ${MODE_NAMES[error.mode]}; it keeps ${MODE_NAMES[mode]}: ${error.reason}`)
+            )
+          )
         ),
     };
   });

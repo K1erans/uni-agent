@@ -116,6 +116,156 @@
           "scope": "machine",
           "markdownDescription": "Path to the `agent` executable (Cursor agent CLI). Leave empty to find it on `PATH`. Machine-scoped: workspace settings cannot change which program Uni Agent runs."
         },
+        "uniAgent.claude.modeOverrides": {
+          "type": "object",
+          "default": {},
+          "scope": "machine",
+          "properties": {
+            "plan": {
+              "type": "string",
+              "enum": [
+                "default",
+                "acceptEdits",
+                "bypassPermissions",
+                "plan",
+                "dontAsk",
+                "auto"
+              ]
+            },
+            "auto_edit": {
+              "type": "string",
+              "enum": [
+                "default",
+                "acceptEdits",
+                "bypassPermissions",
+                "plan",
+                "dontAsk",
+                "auto"
+              ]
+            },
+            "full_auto": {
+              "type": "string",
+              "enum": [
+                "default",
+                "acceptEdits",
+                "bypassPermissions",
+                "plan",
+                "dontAsk",
+                "auto"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "markdownDescription": "Advanced. The Claude Code permission mode to use for each Uni Agent mode (`plan`, `auto_edit`, `full_auto`) instead of the built-in one, for example `{ \"auto_edit\": \"default\" }`. An override can only make a mode stricter: one that would allow more than the built-in setting is ignored and logged. Modes left out keep the built-in mapping; an invalid value is ignored as a whole. Machine-scoped: workspace settings cannot change it."
+        },
+        "uniAgent.codex.modeOverrides": {
+          "type": "object",
+          "default": {},
+          "scope": "machine",
+          "properties": {
+            "plan": {
+              "type": "object",
+              "required": [
+                "approvalPolicy",
+                "sandbox"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "approvalPolicy": {
+                  "type": "string",
+                  "enum": [
+                    "untrusted",
+                    "on-request",
+                    "never"
+                  ]
+                },
+                "sandbox": {
+                  "type": "string",
+                  "enum": [
+                    "read-only",
+                    "workspace-write",
+                    "danger-full-access"
+                  ]
+                }
+              }
+            },
+            "auto_edit": {
+              "type": "object",
+              "required": [
+                "approvalPolicy",
+                "sandbox"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "approvalPolicy": {
+                  "type": "string",
+                  "enum": [
+                    "untrusted",
+                    "on-request",
+                    "never"
+                  ]
+                },
+                "sandbox": {
+                  "type": "string",
+                  "enum": [
+                    "read-only",
+                    "workspace-write",
+                    "danger-full-access"
+                  ]
+                }
+              }
+            },
+            "full_auto": {
+              "type": "object",
+              "required": [
+                "approvalPolicy",
+                "sandbox"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "approvalPolicy": {
+                  "type": "string",
+                  "enum": [
+                    "untrusted",
+                    "on-request",
+                    "never"
+                  ]
+                },
+                "sandbox": {
+                  "type": "string",
+                  "enum": [
+                    "read-only",
+                    "workspace-write",
+                    "danger-full-access"
+                  ]
+                }
+              }
+            }
+          },
+          "additionalProperties": false,
+          "markdownDescription": "Advanced. The Codex approval policy and sandbox to use for each Uni Agent mode (`plan`, `auto_edit`, `full_auto`) instead of the built-in ones, for example `{ \"auto_edit\": { \"approvalPolicy\": \"untrusted\", \"sandbox\": \"read-only\" } }`. An override can only make a mode stricter: one that would allow more than the built-in setting is ignored and logged. Modes left out keep the built-in mapping; an invalid value is ignored as a whole. Machine-scoped: workspace settings cannot change it."
+        },
+        "uniAgent.cursor.modeOverrides": {
+          "type": "object",
+          "default": {},
+          "scope": "machine",
+          "properties": {
+            "plan": {
+              "type": "string",
+              "minLength": 1
+            },
+            "auto_edit": {
+              "type": "string",
+              "minLength": 1
+            },
+            "full_auto": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false,
+          "markdownDescription": "Advanced. The Cursor session mode ID (such as `agent`, `plan` or `ask`) to use for each Uni Agent mode (`plan`, `auto_edit`, `full_auto`) instead of the built-in one. If Cursor does not offer it, a more restrictive mode is used. An override can only make a mode stricter: one that would allow more than the built-in setting is ignored and logged. Modes left out keep the built-in mapping; an invalid value is ignored as a whole. Machine-scoped: workspace settings cannot change it."
+        },
         "uniAgent.verboseLogging": {
           "type": "boolean",
           "default": false,

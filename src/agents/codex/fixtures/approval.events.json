@@ -12,11 +12,11 @@
   {
     "type": "session_started",
     "agent": "codex",
-    "sessionId": "01a0bbbf-479c-7610-8036-06cb89c0bfb6"
+    "sessionId": "01a0cabe-bbc5-7640-b385-d3f9d19100ad"
   },
   {
     "type": "session_configured",
-    "model": "gpt-6-astra",
+    "model": "gpt-5.6-sol",
     "permissionMode": "on-request"
   },
   {
@@ -24,7 +24,7 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "agent_message_chunk",
-      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
+      "messageId": "msg_0d0b8cd26d868d3b016ab2e0f8906887d282f42401a366a770",
       "content": {
         "type": "text",
         "text": "I"
@@ -36,7 +36,7 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "agent_message_chunk",
-      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
+      "messageId": "msg_0d0b8cd26d868d3b016ab2e0f8906887d282f42401a366a770",
       "content": {
         "type": "text",
         "text": "’ll"
@@ -48,7 +48,7 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "agent_message_chunk",
-      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
+      "messageId": "msg_0d0b8cd26d868d3b016ab2e0f8906887d282f42401a366a770",
       "content": {
         "type": "text",
         "text": " create"
@@ -60,10 +60,10 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "agent_message_chunk",
-      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
+      "messageId": "msg_0d0b8cd26d868d3b016ab2e0f8906887d282f42401a366a770",
       "content": {
         "type": "text",
-        "text": " `"
+        "text": " the"
       }
     }
   },
@@ -72,10 +72,10 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "agent_message_chunk",
-      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
+      "messageId": "msg_0d0b8cd26d868d3b016ab2e0f8906887d282f42401a366a770",
       "content": {
         "type": "text",
-        "text": "approved"
+        "text": " requested"
       }
     }
   },
@@ -84,10 +84,10 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "agent_message_chunk",
-      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
+      "messageId": "msg_0d0b8cd26d868d3b016ab2e0f8906887d282f42401a366a770",
       "content": {
         "type": "text",
-        "text": ".txt"
+        "text": " file"
       }
     }
   },
@@ -96,10 +96,10 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "agent_message_chunk",
-      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
+      "messageId": "msg_0d0b8cd26d868d3b016ab2e0f8906887d282f42401a366a770",
       "content": {
         "type": "text",
-        "text": "`"
+        "text": " in"
       }
     }
   },
@@ -108,10 +108,10 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "agent_message_chunk",
-      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
+      "messageId": "msg_0d0b8cd26d868d3b016ab2e0f8906887d282f42401a366a770",
       "content": {
         "type": "text",
-        "text": " containing"
+        "text": " the"
       }
     }
   },
@@ -120,10 +120,10 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "agent_message_chunk",
-      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
+      "messageId": "msg_0d0b8cd26d868d3b016ab2e0f8906887d282f42401a366a770",
       "content": {
         "type": "text",
-        "text": " `"
+        "text": " workspace"
       }
     }
   },
@@ -132,22 +132,10 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "agent_message_chunk",
-      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
+      "messageId": "msg_0d0b8cd26d868d3b016ab2e0f8906887d282f42401a366a770",
       "content": {
         "type": "text",
-        "text": "hi"
-      }
-    }
-  },
-  {
-    "type": "session_update",
-    "turnId": "turn-1",
-    "update": {
-      "sessionUpdate": "agent_message_chunk",
-      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a12ed0487d281f8328e082b2c65",
-      "content": {
-        "type": "text",
-        "text": "`.\n"
+        "text": "."
       }
     }
   },
@@ -156,13 +144,23 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "tool_call",
-      "toolCallId": "exec-d90eaec6-a469-44a4-9a18-07e9015936bf",
-      "title": "/bin/zsh -lc 'printf hi > approved.txt'",
-      "kind": "execute",
+      "toolCallId": "exec-3f233f79-a6a6-4792-a236-2d90fed5a23f",
+      "title": "Edit /var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-l0M5Oy/approved.txt",
+      "kind": "edit",
       "status": "in_progress",
+      "content": [
+        {
+          "type": "content",
+          "content": {
+            "type": "text",
+            "text": "hi\n"
+          }
+        }
+      ],
       "rawInput": {
-        "command": "/bin/zsh -lc 'printf hi > approved.txt'",
-        "cwd": "/var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-MTxYmg"
+        "paths": [
+          "/var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-l0M5Oy/approved.txt"
+        ]
       }
     }
   },
@@ -171,14 +169,13 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "tool_call_update",
-      "toolCallId": "exec-d90eaec6-a469-44a4-9a18-07e9015936bf",
-      "title": "/bin/zsh -lc 'printf hi > approved.txt'",
-      "kind": "execute",
+      "toolCallId": "exec-3f233f79-a6a6-4792-a236-2d90fed5a23f",
+      "title": "Apply file changes",
+      "kind": "edit",
       "status": "pending",
       "rawInput": {
-        "command": "/bin/zsh -lc 'printf hi > approved.txt'",
-        "cwd": "/var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-MTxYmg",
-        "reason": "May I create approved.txt containing hi in the current workspace?"
+        "reason": null,
+        "grantRoot": null
       }
     }
   },
@@ -187,14 +184,13 @@
     "turnId": "turn-1",
     "requestId": "permission-1",
     "toolCall": {
-      "toolCallId": "exec-d90eaec6-a469-44a4-9a18-07e9015936bf",
-      "title": "/bin/zsh -lc 'printf hi > approved.txt'",
-      "kind": "execute",
+      "toolCallId": "exec-3f233f79-a6a6-4792-a236-2d90fed5a23f",
+      "title": "Apply file changes",
+      "kind": "edit",
       "status": "pending",
       "rawInput": {
-        "command": "/bin/zsh -lc 'printf hi > approved.txt'",
-        "cwd": "/var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-MTxYmg",
-        "reason": "May I create approved.txt containing hi in the current workspace?"
+        "reason": null,
+        "grantRoot": null
       }
     },
     "options": [
@@ -204,12 +200,12 @@
         "kind": "allow_once"
       },
       {
-        "optionId": "acceptWithExecpolicyAmendment",
-        "name": "Always allow this command",
+        "optionId": "acceptForSession",
+        "name": "Always allow",
         "kind": "allow_always"
       },
       {
-        "optionId": "cancel",
+        "optionId": "decline",
         "name": "Deny",
         "kind": "reject_once"
       }
@@ -229,16 +225,23 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "tool_call_update",
-      "toolCallId": "exec-d90eaec6-a469-44a4-9a18-07e9015936bf",
-      "title": "/bin/zsh -lc 'printf hi > approved.txt'",
-      "kind": "execute",
+      "toolCallId": "exec-3f233f79-a6a6-4792-a236-2d90fed5a23f",
+      "title": "Edit /var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-l0M5Oy/approved.txt",
+      "kind": "edit",
       "status": "completed",
+      "content": [
+        {
+          "type": "content",
+          "content": {
+            "type": "text",
+            "text": "hi\n"
+          }
+        }
+      ],
       "rawInput": {
-        "command": "/bin/zsh -lc 'printf hi > approved.txt'",
-        "cwd": "/var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-MTxYmg"
-      },
-      "rawOutput": {
-        "exitCode": 0
+        "paths": [
+          "/var/folders/vm/tgjmrmg54cgd_1b36btln3tw0000gn/T/uni-agent-live-l0M5Oy/approved.txt"
+        ]
       }
     }
   },
@@ -247,7 +250,7 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "agent_message_chunk",
-      "messageId": "msg_0e6e4fea99aa1cf0016aaf0a1679cc87d2bf80ccca630e5e1c",
+      "messageId": "msg_0d0b8cd26d868d3b016ab2e0fbab2087d2b4d7f5b667767e5d",
       "content": {
         "type": "text",
         "text": "done"

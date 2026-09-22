@@ -718,6 +718,32 @@ body.vscode-high-contrast-light .send-button {
   opacity: 0.6;
 }
 
+/* The mode picker is a native select laid over its styled value, so it keeps the platform's menu and keyboard handling. */
+.control-mode {
+  position: relative;
+  cursor: pointer;
+}
+
+.control-select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  opacity: 0;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.control-select:disabled,
+.control-mode:has(.control-select:disabled) {
+  cursor: default;
+}
+
+.control-mode:has(.control-select:focus-visible) {
+  outline: 1px solid var(--ua-focus);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
 .control-separator {
   flex: none;
   width: 1px;

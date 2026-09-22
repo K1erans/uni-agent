@@ -1,12 +1,14 @@
-import type {
-  AgentErrorCode,
-  PermissionOption,
-  PermissionOutcome,
-  StopReason,
-  ToolCall,
-  ToolCallContent,
-  ToolCallStatus,
-  ToolKind,
+import {
+  DEFAULT_MODE,
+  type AgentErrorCode,
+  type Mode,
+  type PermissionOption,
+  type PermissionOutcome,
+  type StopReason,
+  type ToolCall,
+  type ToolCallContent,
+  type ToolCallStatus,
+  type ToolKind,
 } from '../../src/agents/events';
 import type { ExtensionMessage, ThreadEvent, ThreadInfo } from '../../src/protocol';
 
@@ -73,6 +75,8 @@ export interface SessionConfig {
 export interface ThreadState {
   /** The thread shown, including the agent it talks to; undefined until the extension sends one. */
   thread: ThreadInfo | undefined;
+  /** How freely the thread's agent may act, as the extension last reported it. */
+  mode: Mode;
   /** What the agent last reported running the session with; undefined until its process starts. */
   config: SessionConfig | undefined;
   /** The branch checked out in the thread's workspace, if known. */
@@ -86,6 +90,7 @@ export interface ThreadState {
 
 export const emptyThread: ThreadState = {
   thread: undefined,
+  mode: DEFAULT_MODE,
   config: undefined,
   branch: null,
   items: [],
@@ -104,10 +109,12 @@ export type ThreadAction = ExtensionMessage | { type: 'prompt_sent' };
 export function threadReducer(state: ThreadState, action: ThreadAction): ThreadState {
   switch (action.type) {
     case 'history':
-      return action.events.reduce(applyEvent, { ...emptyThread, thread: action.thread });
+      return action.events.reduce(applyEvent, { ...emptyThread, thread: action.thread, mode: action.mode });
     case 'event':
       // Events only come from the shown thread; this guards against one crossing a thread switch.
       return action.threadId === state.thread?.id ? applyEvent(state, action) : state;
+    case 'mode':
+      return action.threadId === state.thread?.id ? { ...state, mode: action.mode } : state;
     case 'branch':
       return { ...state, branch: action.name };
     case 'prompt_sent':

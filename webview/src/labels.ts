@@ -1,7 +1,7 @@
-import type { AgentErrorCode, ToolCallStatus } from '../../src/agents/events';
+import type { AgentErrorCode, Mode, ToolCallStatus } from '../../src/agents/events';
 import type { AgentStatus } from './threadState';
 
-export { AGENT_NAMES } from '../../src/agents/events';
+export { AGENT_NAMES, MODE_NAMES } from '../../src/agents/events';
 
 export const STATUS_LABELS = {
   ready: 'Ready',
@@ -31,6 +31,13 @@ const PERMISSION_MODES = new Map([
 export function permissionLabel(mode: string): string {
   return PERMISSION_MODES.get(mode) ?? mode;
 }
+
+/** What each mode lets the agent do, for the mode picker. */
+export const MODE_DESCRIPTIONS = {
+  plan: 'Investigates without changing anything',
+  auto_edit: 'Edits files freely, asks before running commands',
+  full_auto: 'Edits and runs commands without asking',
+} satisfies Record<Mode, string>;
 
 /** What a tool call's status says it is doing, for the badge on its header. */
 export const TOOL_STATUS_LABELS = {

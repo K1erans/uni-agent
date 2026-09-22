@@ -1,7 +1,8 @@
 import { Effect, ExecutionStrategy, Exit, Option, Scope } from 'effect';
 import type { MakeAdapter } from './agents/adapter';
-import type { AgentKind } from './agents/events';
+import type { AgentKind, Mode } from './agents/events';
 import { Branches } from './branches';
+import { FullAutoOptIn } from './fullAutoOptIn';
 import { Ids } from './ids';
 import { makeThread, type Post, type Thread, type Workspace } from './thread';
 
@@ -35,6 +36,11 @@ export interface Threads {
   prompt(threadId: string, text: string): Effect.Effect<void>;
   /** Answers a permission request in the thread with this ID, whether or not it is shown. */
   respond(threadId: string, requestId: string, optionId: string): Effect.Effect<void>;
+  /**
+   * Switches the thread with this ID to `mode`. Full auto is refused until the workspace has opted
+   * in, so the thread keeps its mode and the webview keeps showing it.
+   */
+  setMode(threadId: string, mode: Mode): Effect.Effect<void>;
 }
 
 /** The agent a thread talks to when nothing chose one. */
@@ -49,11 +55,12 @@ export function makeThreads<R>(
   workspace: () => Workspace,
   makeAdapter: (agent: AgentKind, workspace: Workspace) => MakeAdapter<R>,
   onChanged: () => Effect.Effect<void> = () => Effect.void
-): Effect.Effect<Threads, never, R | Ids | Branches | Scope.Scope> {
+): Effect.Effect<Threads, never, R | Ids | Branches | FullAutoOptIn | Scope.Scope> {
   return Effect.gen(function* () {
     const scope = yield* Effect.scope;
     const ids = yield* Ids;
     const branches = yield* Branches;
+    const fullAuto = yield* FullAutoOptIn;
     const context = yield* Effect.context<R>();
     // Serialises everything that changes which thread is shown or connected, since VS Code
     // callbacks can start them concurrently.
@@ -156,6 +163,17 @@ export function makeThreads<R>(
         Option.match(find(threadId), {
           onNone: () => Effect.logWarning(`Ignored an answer for unknown thread ${threadId}`),
           onSome: (thread) => thread.respond(requestId, optionId),
+        }),
+      setMode: (threadId, mode) =>
+        Option.match(find(threadId), {
+          onNone: () => Effect.logWarning(`Ignored a mode for unknown thread ${threadId}`),
+          onSome: (thread) =>
+            Effect.gen(function* () {
+              if (mode === 'full_auto' && !(yield* fullAuto.granted)) {
+                return yield* Effect.logWarning(`Kept thread ${threadId} out of Full auto: this workspace has not opted in`);
+              }
+              yield* thread.setMode(mode);
+            }),
         }),
     };
   });

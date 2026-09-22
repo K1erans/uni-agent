@@ -4,15 +4,22 @@ import * as path from 'node:path';
 import { Effect, Exit, Layer, Option, Scope } from 'effect';
 import { Ids } from '../ids';
 import type { AdapterOptions, AgentAdapter } from '../agents/adapter';
-import type { AgentEvent } from '../agents/events';
+import { DEFAULT_MODE, type AgentEvent, type Mode } from '../agents/events';
 import { Executables } from '../agents/findExecutable';
+import { ModeSettings } from '../agents/modes';
 import { Stdio, type StdioCommand } from '../agents/stdio';
 import { recordedCwd, recordingStdio, replayStdio } from '../agents/stdioTraffic';
 import { readTraffic, TrafficRecorder, type TrafficLine, type WireMessage } from '../agents/traffic';
 import { allowOnce, recordingSink, type Answer } from './eventSink';
 
 /** Builds an adapter for an agent Uni Agent runs over stdio, such as `CodexAdapter.make`. */
-export type MakeStdioAdapter = (options: AdapterOptions) => Effect.Effect<AgentAdapter, never, Stdio | Executables | Ids | Scope.Scope>;
+export type MakeStdioAdapter = (options: AdapterOptions) => Effect.Effect<AgentAdapter, never, Stdio | Executables | Ids | ModeSettings | Scope.Scope>;
+
+/** The mode an adapter starts in, and the mode settings it reads; by default Auto-edit with no overrides. */
+export interface ModeSetup {
+  readonly mode?: Mode;
+  readonly settings?: Layer.Layer<ModeSettings>;
+}
 
 /**
  * Replays a fixture recorded by {@link recordFixture} through the adapter, prompting it as the
@@ -24,7 +31,8 @@ export function replayFixture(make: MakeStdioAdapter, fixture: string, prompt: s
   const services = Layer.mergeAll(
     Layer.succeed(Stdio, replayStdio([traffic])),
     Layer.succeed(Executables, { find: (name) => Effect.succeed(Option.some(`/usr/local/bin/${name}`)) }),
-    Layer.succeed(Ids, { next: Effect.sync(() => `turn-${++turns}`) })
+    Layer.succeed(Ids, { next: Effect.sync(() => `turn-${++turns}`) }),
+    ModeSettings.none
   );
   return runPrompt(make, recordedCwd(traffic), prompt, services, answer);
 }
@@ -50,21 +58,21 @@ export function recordFixture(
       return recordingStdio({ spawn: (command) => live.spawn({ ...command, env }) }, recorder, redact);
     })
   ).pipe(Layer.provide(Stdio.live));
-  return runPrompt(make, cwd, prompt, Layer.mergeAll(recording, Executables.live, Ids.live), answer);
+  return runPrompt(make, cwd, prompt, Layer.mergeAll(recording, Executables.live, Ids.live, ModeSettings.none), answer);
 }
 
 async function runPrompt(
   make: MakeStdioAdapter,
   cwd: string,
   prompt: string,
-  services: Layer.Layer<Stdio | Executables | Ids>,
+  services: Layer.Layer<Stdio | Executables | Ids | ModeSettings>,
   answer: Answer
 ): Promise<AgentEvent[]> {
   const events: AgentEvent[] = [];
   await Effect.runPromise(
     Effect.gen(function* () {
       let adapter: AgentAdapter | undefined;
-      adapter = yield* make({ cwd, executablePath: Option.none(), onEvent: recordingSink(events, answer, () => adapter) });
+      adapter = yield* make({ cwd, executablePath: Option.none(), mode: DEFAULT_MODE, onEvent: recordingSink(events, answer, () => adapter) });
       yield* adapter.prompt([{ type: 'text', text: prompt }]);
     }).pipe(Effect.scoped, Effect.provide(services))
   );
@@ -100,12 +108,14 @@ export const exit = (error: string): TrafficLine => ({ dir: 'exit', error });
  * the test can close. Turn IDs are `turn-1`, `turn-2`...
  *
  * @param answer How the user answers a permission request; no answer leaves the request open.
+ * @param modes The mode the adapter starts in and the mode settings it reads.
  */
 export function setupAdapter(
   make: MakeStdioAdapter,
   processes: ReadonlyArray<readonly TrafficLine[]>,
   find: (name: string) => Option.Option<string> = (name) => Option.some(`/usr/local/bin/${name}`),
-  answer?: Answer
+  answer?: Answer,
+  { mode = DEFAULT_MODE, settings = ModeSettings.none }: ModeSetup = {}
 ) {
   const events: AgentEvent[] = [];
   const spawned: StdioCommand[] = [];
@@ -114,13 +124,14 @@ export function setupAdapter(
   const services = Layer.mergeAll(
     Layer.succeed(Stdio, { spawn: (command) => Effect.zipRight(Effect.sync(() => spawned.push(command)), replay.spawn(command)) }),
     Layer.succeed(Executables, { find: (name) => Effect.sync(() => find(name)) }),
-    Layer.succeed(Ids, { next: Effect.sync(() => `turn-${++turns}`) })
+    Layer.succeed(Ids, { next: Effect.sync(() => `turn-${++turns}`) }),
+    settings
   );
   const scope = Effect.runSync(Scope.make());
   // The sink reaches the adapter to answer its asks, and only ever runs once it has been built.
   let built: AgentAdapter | undefined;
   built = Effect.runSync(
-    make({ cwd: '/workspace', executablePath: Option.none(), onEvent: recordingSink(events, answer, () => built) }).pipe(
+    make({ cwd: '/workspace', executablePath: Option.none(), mode, onEvent: recordingSink(events, answer, () => built) }).pipe(
       Scope.extend(scope),
       Effect.provide(services)
     )

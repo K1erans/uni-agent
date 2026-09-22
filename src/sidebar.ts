@@ -2,6 +2,7 @@ import * as crypto from 'node:crypto';
 import { Effect, ExecutionStrategy, Exit, Option, Runtime, Schema, Scope } from 'effect';
 import * as vscode from 'vscode';
 import { disposable } from './disposable';
+import { FullAutoOptIn } from './fullAutoOptIn';
 import { WebviewMessage } from './protocol';
 import type { Post } from './thread';
 import type { Threads } from './threads';
@@ -20,10 +21,10 @@ export function registerSidebar(
   extensionUri: vscode.Uri,
   threads: Threads,
   onReady: (view: vscode.WebviewView) => void
-): Effect.Effect<void, never, Scope.Scope> {
+): Effect.Effect<void, never, FullAutoOptIn | Scope.Scope> {
   return Effect.gen(function* () {
     const scope = yield* Effect.scope;
-    const run = Runtime.runFork(yield* Effect.runtime<never>());
+    const run = Runtime.runFork(yield* Effect.runtime<FullAutoOptIn>());
     const webviewRoot = vscode.Uri.joinPath(extensionUri, 'dist', 'webview');
 
     /** Wires one webview up; everything it acquires lives until VS Code disposes the view. */
@@ -40,6 +41,8 @@ export function registerSidebar(
               return threads.prompt(message.threadId, message.text);
             case 'permission_response':
               return threads.respond(message.threadId, message.requestId, message.optionId);
+            case 'set_mode':
+              return Effect.zipRight(message.mode === 'full_auto' ? confirmFullAuto : Effect.void, threads.setMode(message.threadId, message.mode));
             case 'copy':
               return Effect.tryPromise(async () => vscode.env.clipboard.writeText(message.text)).pipe(
                 Effect.catchAll((error) => Effect.logWarning('Could not copy to the clipboard', error))
@@ -68,6 +71,29 @@ export function registerSidebar(
     yield* disposable(() => vscode.window.registerWebviewViewProvider(SIDEBAR_VIEW_ID, provider));
   });
 }
+
+/** Asks the user, once per workspace, to allow Full auto; `Threads` refuses it until they have. */
+const confirmFullAuto = Effect.gen(function* () {
+  const optIn = yield* FullAutoOptIn;
+  if (yield* optIn.granted) {
+    return;
+  }
+  const allow = 'Allow Full Auto';
+  const answer = yield* Effect.promise(async () =>
+    vscode.window.showWarningMessage(
+      'Allow Full auto in this workspace?',
+      {
+        modal: true,
+        detail:
+          'In Full auto, agents edit files and run commands without asking first. Uni Agent remembers your choice for this workspace.',
+      },
+      allow
+    )
+  );
+  if (answer === allow) {
+    yield* optIn.grant;
+  }
+});
 
 function renderHtml(webview: vscode.Webview, webviewRoot: vscode.Uri): string {
   const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(webviewRoot, 'main.js'));

@@ -1,5 +1,6 @@
 import { Effect, Either, Option } from 'effect';
 import { describe, expect, it, vi } from 'vitest';
+import { modeSettings } from '../../testing/modeSettings';
 import { agentRequest, answer, exit, methodNotFound, notification, notify, request, result, setupAdapter } from '../../testing/stdioFixtures';
 import { TurnInProgress } from '../adapter';
 import { CLIENT_INFO } from '../jsonRpcAdapter';
@@ -22,9 +23,21 @@ function handshake(open: TrafficLine = request(3, 'thread/start', { cwd: '/works
   ];
 }
 
-function turnStart(id: number, text: string): TrafficLine[] {
+/** What a turn tells Codex about when to ask and what it may touch. */
+interface TurnPolicy {
+  readonly approvalPolicy: string;
+  readonly sandboxPolicy: WireMessage;
+}
+
+/** Auto-edit, the mode adapters start in: Codex asks before edits and commands, and writes only to the workspace. */
+const AUTO_EDIT: TurnPolicy = {
+  approvalPolicy: 'untrusted',
+  sandboxPolicy: { type: 'workspaceWrite', writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false },
+};
+
+function turnStart(id: number, text: string, policy: TurnPolicy = AUTO_EDIT): TrafficLine[] {
   return [
-    request(id, 'turn/start', { threadId: THREAD, input: [{ type: 'text', text, text_elements: [] }] }),
+    request(id, 'turn/start', { threadId: THREAD, input: [{ type: 'text', text, text_elements: [] }], ...policy }),
     result(id, { turn: { id: TURN } }),
   ];
 }
@@ -396,5 +409,61 @@ describe('CodexAdapter', () => {
     await dispose();
     expect(await turn).toBe('cancelled');
     expect(errors()).toEqual([]);
+  });
+
+  describe('modes', () => {
+    const PLAN: TurnPolicy = { approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly', networkAccess: false } };
+
+    it('starts each turn with the policy of the mode it starts in', async () => {
+      const { prompt } = setupAdapter(CodexAdapter.make, [[...handshake(), ...turnStart(4, 'look', PLAN), turnCompleted('completed')]], undefined, undefined, {
+        mode: 'plan',
+      });
+
+      expect(await prompt('look')).toBe('end_turn');
+    });
+
+    it('applies a mode changed between turns from the next turn', async () => {
+      const { adapter, errors, prompt } = setupAdapter(CodexAdapter.make, [
+        [...handshake(), ...turnStart(4, 'one'), turnCompleted('completed'), ...turnStart(5, 'two', PLAN), turnCompleted('completed')],
+      ]);
+
+      expect(await prompt('one')).toBe('end_turn');
+      await Effect.runPromise(adapter.setMode('plan'));
+      expect(await prompt('two')).toBe('end_turn');
+      expect(errors()).toEqual([]);
+    });
+
+    it('uses the policy the modeOverrides setting names for a mode', async () => {
+      const override = { approvalPolicy: 'on-request', sandbox: 'read-only' };
+      const { errors, prompt } = setupAdapter(
+        CodexAdapter.make,
+        [
+          [
+            ...handshake(),
+            ...turnStart(4, 'look', { approvalPolicy: 'on-request', sandboxPolicy: { type: 'readOnly', networkAccess: false } }),
+            turnCompleted('completed'),
+          ],
+        ],
+        undefined,
+        undefined,
+        { mode: 'plan', settings: modeSettings({ codex: { plan: override } }) }
+      );
+
+      expect(await prompt('look')).toBe('end_turn');
+      expect(errors()).toEqual([]);
+    });
+
+    it('falls back to the built-in policy when the modeOverrides setting is invalid', async () => {
+      const { errors, prompt } = setupAdapter(
+        CodexAdapter.make,
+        [[...handshake(), ...turnStart(4, 'look', PLAN), turnCompleted('completed')]],
+        undefined,
+        undefined,
+        { mode: 'plan', settings: modeSettings({ codex: { plan: { approvalPolicy: 'sometimes', sandbox: 'read-only' } } }) }
+      );
+
+      expect(await prompt('look')).toBe('end_turn');
+      expect(errors()).toEqual([]);
+    });
   });
 });
