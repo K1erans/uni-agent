@@ -21,7 +21,7 @@ import { modeSettingsLive, readSetting } from './settings';
 import { registerSidebar, SIDEBAR_VIEW_ID } from './sidebar';
 import type { Thread, Workspace } from './thread';
 import { makeThreads, type Threads } from './threads';
-import { GitRunner, type GitFailed, type WorktreeSetupFailed } from './worktrees';
+import { GitRunner, WorktreeSetupFailed, type GitFailed } from './worktrees';
 
 const COMMANDS = [
   'uniAgent.newThread',
@@ -94,7 +94,11 @@ function startServices(
     const showWaiting = (): Effect.Effect<void> => Effect.ignore(Effect.try(() => badgeWaiting(sidebar, threads)));
     const threads: Threads = yield* makeThreads(currentWorkspace, makeAdapter, showWaiting, {
       storagePath: path.join(storagePath, 'worktrees'),
-      setupCommand: (where) => Option.getOrUndefined(readSetting('worktree.setupCommand', Schema.NonEmptyString, vscode.Uri.file(where.cwd))),
+      // Workspace settings may come from the repository. Never execute one while VS Code
+      // considers that workspace untrusted, even if a caller bypasses the command picker.
+      setupCommand: (where) => vscode.workspace.isTrusted
+        ? Option.getOrUndefined(readSetting('worktree.setupCommand', Schema.NonEmptyString, vscode.Uri.file(where.cwd)))
+        : undefined,
     });
     const webviewReady = yield* disposable(() => new vscode.EventEmitter<vscode.WebviewView>());
     yield* registerSidebar(extensionUri, threads, (view) => {
@@ -164,6 +168,9 @@ function threadNote(thread: Thread, current: boolean): string | undefined {
 /** Starts a thread with the agent the user picks; a stand-in until the agent picker lands. */
 function pickAgent(threads: Threads, isolated = false): Effect.Effect<void, GitFailed | WorktreeSetupFailed> {
   return Effect.gen(function* () {
+    if (isolated && !vscode.workspace.isTrusted) {
+      return yield* new WorktreeSetupFailed({ reason: 'Trust this workspace before creating a worktree thread.' });
+    }
     const shown = threads.current?.info.agent;
     const items = AgentKind.literals.map((agent) => ({
       label: AGENT_NAMES[agent],

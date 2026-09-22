@@ -66,7 +66,8 @@ Press <kbd>F5</kbd> to launch an Extension Development Host with Uni Agent loade
 - **Uni Agent: New Thread With Agent…** — asks which agent a new thread talks to; also in
   the sidebar's `···` menu. A stand-in until the composer's agent picker lands.
 - **Uni Agent: New Worktree Thread…** — creates a separate checkout and branch under the
-  extension's storage, runs the configured setup command, then opens a thread there.
+  extension's storage, runs the configured setup command, then opens a thread there. VS Code
+  must trust the workspace before this command is available.
 - **Uni Agent: Review Worktree Changes**, **Open Worktree in New Window**, and
   **Remove Worktree…** — inspect, open, or remove the shown thread's checkout. Removal asks
   whether to keep or discard its branch.
