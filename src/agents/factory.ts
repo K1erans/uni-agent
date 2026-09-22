@@ -11,7 +11,7 @@ import type { Ids } from '../ids';
 
 export type AgentServices = ClaudeSdk | Stdio | Executables | Ids | ModeSettings;
 
-/** Builds the selected native agent session for any host (VS Code, MCP, or a test). */
+/** Builds the selected native agent session for the VS Code extension or a test. */
 export function makeAgentAdapter(agent: AgentKind, options: AdapterOptions): Effect.Effect<AgentAdapter, never, AgentServices | Scope.Scope> {
   switch (agent) {
     case 'claude':

@@ -12,7 +12,7 @@ import { notify, notification, request, result } from './testing/stdioFixtures';
 import { GitRunner } from './worktrees';
 
 describe('backend task', () => {
-  it('runs a selected agent and model without a VS Code host', async () => {
+  it('runs a selected agent and model independently of the VS Code UI', async () => {
     const traffic = [
       request(1, 'initialize', { clientInfo: CLIENT_INFO, capabilities: null }),
       result(1, { userAgent: 'codex' }),

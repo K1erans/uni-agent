@@ -2,7 +2,7 @@ import { Effect, type Scope } from 'effect';
 import { TurnInProgress, type AgentAdapter, type MakeAdapter, type ModeChangeFailed, type UnknownPermissionRequest } from './agents/adapter';
 import { DEFAULT_MODE, type AgentEvent, type AgentKind, type Mode, type StopReason } from './agents/events';
 
-/** One agent session owned by a caller's scope, independent of VS Code or MCP. */
+/** One agent session owned by a caller's scope, independent of the VS Code UI. */
 export interface Delegation {
   readonly agent: AgentKind;
   /** Runs one turn and returns the events and final reply for review. */
@@ -23,8 +23,8 @@ export interface DelegationResult {
 
 /**
  * Builds a session from any agent adapter. The caller provides its dependencies and event sink,
- * then owns its lifetime with an Effect scope. A future MCP server and the VS Code extension can
- * use the same interface; neither transport is part of this module.
+ * then owns its lifetime with an Effect scope. The VS Code extension can use this interface
+ * without bringing UI concerns into the agent lifecycle.
  */
 export function makeDelegation<R>(
   makeAdapter: MakeAdapter<R>,
