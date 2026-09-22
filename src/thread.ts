@@ -79,6 +79,9 @@ export function makeThread<R>(
     let prompted = false;
     let title: string | undefined;
     let mode = DEFAULT_MODE;
+    // Mode changes arrive on fibers of their own; one at a time keeps the mode shown in step with
+    // the one the agent runs in.
+    const modeLock = yield* Effect.makeSemaphore(1);
 
     const adapter = yield* makeAdapter((event) =>
       Effect.flatMap(Clock.currentTimeMillis, (at) => {
@@ -142,17 +145,19 @@ export function makeThread<R>(
           Effect.logDebug(`Ignored an answer for permission request ${error.requestId} of thread ${id}`)
         ),
       setMode: (next) =>
-        adapter.setMode(next).pipe(
-          // Only a switch the agent accepted is shown: the webview must never show a stricter mode
-          // than the agent really runs in.
-          Effect.zipRight(
-            Effect.suspend(() => {
-              mode = next;
-              return post ? post({ type: 'mode', threadId: id, mode: next }) : Effect.void;
-            })
-          ),
-          Effect.catchTag('ModeChangeFailed', (error) =>
-            Effect.logWarning(`${AGENT_NAMES[error.agent]} refused to switch thread ${id} to ${MODE_NAMES[error.mode]}; it keeps ${MODE_NAMES[mode]}: ${error.reason}`)
+        modeLock.withPermits(1)(
+          adapter.setMode(next).pipe(
+            // Only a switch the agent accepted is shown: the webview must never show a stricter mode
+            // than the agent really runs in.
+            Effect.zipRight(
+              Effect.suspend(() => {
+                mode = next;
+                return post ? post({ type: 'mode', threadId: id, mode: next }) : Effect.void;
+              })
+            ),
+            Effect.catchTag('ModeChangeFailed', (error) =>
+              Effect.logWarning(`${AGENT_NAMES[error.agent]} refused to switch thread ${id} to ${MODE_NAMES[error.mode]}; it keeps ${MODE_NAMES[mode]}: ${error.reason}`)
+            )
           )
         ),
     };

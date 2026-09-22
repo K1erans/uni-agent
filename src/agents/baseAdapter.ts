@@ -25,6 +25,11 @@ export abstract class BaseAdapter<T extends Turn> implements AgentAdapter {
   protected mode: Mode;
   /** Whether the scope has closed, so the process stopping is expected rather than a crash. */
   protected disposed = false;
+  /**
+   * Lets one mode change run at a time. A refused change restores the mode it replaced, which is
+   * only right if no other change has landed since.
+   */
+  private readonly modeLock = Effect.unsafeMakeSemaphore(1);
 
   protected constructor(
     protected readonly options: AdapterOptions,
@@ -101,12 +106,14 @@ export abstract class BaseAdapter<T extends Turn> implements AgentAdapter {
   }
 
   setMode(mode: Mode): Effect.Effect<void, ModeChangeFailed> {
-    return Effect.suspend(() => {
-      const previous = this.mode;
-      this.mode = mode;
-      // A refused switch leaves the agent in the previous mode, so the adapter says so too.
-      return Effect.tapError(this.applyMode(), () => Effect.sync(() => (this.mode = previous)));
-    });
+    return this.modeLock.withPermits(1)(
+      Effect.suspend(() => {
+        const previous = this.mode;
+        this.mode = mode;
+        // A refused switch leaves the agent in the previous mode, so the adapter says so too.
+        return Effect.tapError(this.applyMode(), () => Effect.sync(() => (this.mode = previous)));
+      })
+    );
   }
 
   /**

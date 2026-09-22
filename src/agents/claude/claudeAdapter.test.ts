@@ -85,6 +85,8 @@ interface SetupOptions {
   settings?: Layer.Layer<ModeSettings>;
   /** Makes running Claude processes refuse every permission mode switch. */
   refuseSwitch?: boolean;
+  /** Settles each permission mode switch; by default it succeeds at once. */
+  settleSwitch?: (mode: PermissionMode) => Promise<void>;
 }
 
 /**
@@ -100,6 +102,7 @@ function setup(
     mode = DEFAULT_MODE,
     settings = ModeSettings.none,
     refuseSwitch = false,
+    settleSwitch = async () => undefined,
   }: SetupOptions = {}
 ) {
   const events: AgentEvent[] = [];
@@ -120,6 +123,7 @@ function setup(
               throw new Error('Cannot change permission mode now');
             }
             switched.push(permissionMode);
+            await settleSwitch(permissionMode);
           },
         };
       },
@@ -513,6 +517,31 @@ describe('ClaudeAdapter', () => {
     await prompt('two');
     expect(started).toHaveLength(1);
     expect(started[0]).toMatchObject({ permissionMode: 'plan' });
+  });
+
+  it('runs overlapping mode changes one at a time, so a refused one cannot undo a later one', async () => {
+    let refusePlan: (() => void) | undefined;
+    const { adapter, switched, prompt } = setup([[{ dir: 'send', data: userMessage('hi') }, { dir: 'recv', data: result() }]], {
+      mode: 'full_auto',
+      settleSwitch: (mode) =>
+        mode === 'plan' ? new Promise((_resolve, reject) => (refusePlan = () => reject(new Error('Cannot change permission mode now')))) : Promise.resolve(),
+    });
+    await prompt('hi');
+
+    const toPlan = Effect.runPromise(Effect.either(adapter.setMode('plan')));
+    await vi.waitFor(() => expect(refusePlan).toBeDefined());
+    const toAutoEdit = Effect.runPromise(Effect.either(adapter.setMode('auto_edit')));
+    await Effect.runPromise(Effect.sleep('10 millis'));
+    // The second change waits for the first to settle.
+    expect(switched).toEqual(['plan']);
+
+    refusePlan?.();
+    expect(Either.isLeft(await toPlan)).toBe(true);
+    expect(Either.isRight(await toAutoEdit)).toBe(true);
+    expect(switched).toEqual(['plan', 'acceptEdits']);
+    // Auto-edit, not the Full auto the refused change restored: switching to Full auto is a real change.
+    await Effect.runPromise(adapter.setMode('full_auto'));
+    expect(switched).toEqual(['plan', 'acceptEdits', 'bypassPermissions']);
   });
 
   it('ignores an override that would give a mode more freedom than its built-in setting', async () => {
