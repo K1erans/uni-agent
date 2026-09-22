@@ -13,14 +13,14 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { Context, type Deferred, Effect, Layer, Option, Queue, Runtime, Schema, type Scope, Stream } from 'effect';
 import { Ids } from '../../ids';
-import { notSignedInMessage, type AdapterOptions } from '../adapter';
+import { ModeChangeFailed, notSignedInMessage, type AdapterOptions } from '../adapter';
 import { BaseAdapter } from '../baseAdapter';
 import type { AgentErrorCode, ContentBlock, StopReason, ToolCall, ToolCallStatus } from '../events';
 import { Executables } from '../findExecutable';
 import { ModeSettings } from '../modes';
 import { WireMessage } from '../traffic';
 import { Turn } from '../turn';
-import { ClaudeModeOverrides, claudePermissionMode } from './claudeModes';
+import { ClaudeModeOverrides, claudeNoLooser, claudePermissionMode } from './claudeModes';
 import { describeTool, permissionOptions, ToolResultContent, toolResultContent } from './claudeTools';
 
 /** The part of the Agent SDK's `Query` the adapter uses; lets tests substitute a fake agent. */
@@ -87,10 +87,12 @@ class Connection {
     );
   }
 
-  setPermissionMode(mode: PermissionMode): Effect.Effect<void> {
-    return Effect.tryPromise(() => this.query.setPermissionMode(mode)).pipe(
-      Effect.catchAll((error) => Effect.logWarning(`Could not switch Claude Code to the ${mode} permission mode`, error))
-    );
+  /** Switches the running Claude; fails with why when it refuses, so the caller keeps the mode it had. */
+  setPermissionMode(mode: PermissionMode): Effect.Effect<void, string> {
+    return Effect.tryPromise({
+      try: () => this.query.setPermissionMode(mode),
+      catch: (err) => (err instanceof Error ? err.message : String(err)),
+    });
   }
 
   /** The last lines Claude wrote to stderr, which usually explain a crash. */
@@ -187,9 +189,10 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
   /**
    * Switches the running Claude to the mode's permission mode. Bypassing permissions needs a Claude
    * started able to, so a Claude started without it keeps its current, more restrictive mode until
-   * the next prompt restarts it.
+   * the next prompt restarts it. If Claude refuses the switch, it fails, so the thread keeps showing
+   * the mode Claude still runs in.
    */
-  protected applyMode(): Effect.Effect<void> {
+  protected applyMode(): Effect.Effect<void, ModeChangeFailed> {
     return Effect.gen(this, function* () {
       const permissionMode = yield* this.permissionMode();
       const connection = this.connection;
@@ -199,12 +202,12 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
       if (permissionMode === 'bypassPermissions' && !connection.canBypass) {
         return yield* Effect.logDebug('Claude Code switches to bypassing permissions when it restarts for the next prompt');
       }
-      yield* connection.setPermissionMode(permissionMode);
+      yield* Effect.mapError(connection.setPermissionMode(permissionMode), (reason) => new ModeChangeFailed({ agent: this.agent, mode: this.mode, reason }));
     });
   }
 
   private permissionMode(): Effect.Effect<PermissionMode> {
-    return this.native(claudePermissionMode, ClaudeModeOverrides);
+    return this.native(claudePermissionMode, ClaudeModeOverrides, claudeNoLooser);
   }
 
   private connect(executable: string): Effect.Effect<Connection> {

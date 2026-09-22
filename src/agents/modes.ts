@@ -23,10 +23,30 @@ export class ModeSettings extends Context.Tag('uni-agent/ModeSettings')<
   static readonly none = Layer.succeed(ModeSettings, { overrides: () => Effect.succeedNone });
 }
 
-/** The native settings for `mode`: the override if one is set for it, otherwise the built-in mapping. */
-export function nativeMode<A>(mode: Mode, builtIn: (mode: Mode) => A, overrides: Option.Option<ModeOverrides<A>>): A {
-  return Option.getOrElse(
+/** The native settings a mode runs with, and an override that was set for it but ignored. */
+export interface NativeChoice<A> {
+  readonly native: A;
+  readonly ignored: Option.Option<A>;
+}
+
+/**
+ * The native settings for `mode`: the override set for it, otherwise the built-in mapping. An
+ * override may only make a mode stricter: one that `noLooser` says grants more than the built-in
+ * setting is ignored, so no setting can give a mode more freedom than its name promises.
+ */
+export function nativeMode<A>(
+  mode: Mode,
+  builtIn: (mode: Mode) => A,
+  overrides: Option.Option<ModeOverrides<A>>,
+  noLooser: (override: A, builtIn: A) => boolean
+): NativeChoice<A> {
+  const mapped = builtIn(mode);
+  return Option.match(
     Option.flatMap(overrides, (set) => Option.fromNullable(set[mode])),
-    () => builtIn(mode)
+    {
+      onNone: () => ({ native: mapped, ignored: Option.none() }),
+      onSome: (override) =>
+        noLooser(override, mapped) ? { native: override, ignored: Option.none() } : { native: mapped, ignored: Option.some(override) },
+    }
   );
 }

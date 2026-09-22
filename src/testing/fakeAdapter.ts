@@ -1,6 +1,6 @@
 import { Effect } from 'effect';
 import type { AgentAdapter, EventSink, MakeAdapter } from '../agents/adapter';
-import { UnknownPermissionRequest } from '../agents/adapter';
+import { ModeChangeFailed, UnknownPermissionRequest } from '../agents/adapter';
 import type { AgentKind, ContentBlock, Mode, StopReason } from '../agents/events';
 
 /** An adapter for tests whose turns run until the test ends them. */
@@ -10,6 +10,8 @@ export class FakeAdapter implements AgentAdapter {
   readonly answers: [string, string][] = [];
   /** The mode the adapter was built with, then each one the thread switched it to. */
   readonly modes: Mode[];
+  /** Set by a test to make the agent refuse every mode switch. */
+  refusesModes = false;
   disposed = false;
   private readonly requests = new Set<string>();
 
@@ -60,8 +62,10 @@ export class FakeAdapter implements AgentAdapter {
     });
   }
 
-  setMode(mode: Mode): Effect.Effect<void> {
-    return Effect.sync(() => void this.modes.push(mode));
+  setMode(mode: Mode): Effect.Effect<void, ModeChangeFailed> {
+    return Effect.suspend(() =>
+      this.refusesModes ? new ModeChangeFailed({ agent: this.agent, mode, reason: 'refused by the test' }) : Effect.sync(() => void this.modes.push(mode))
+    );
   }
 
   /** Announces a permission request the test can then answer. */

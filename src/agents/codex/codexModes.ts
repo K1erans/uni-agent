@@ -17,6 +17,21 @@ export type CodexPolicy = typeof CodexPolicy.Type;
 export const CodexModeOverrides = modeOverrides(CodexPolicy);
 
 /**
+ * How much each approval policy lets Codex do without asking, from least to most. `on-request` and
+ * `never` both run commands inside the sandbox without asking, and neither leaves it without the user.
+ */
+const APPROVAL_FREEDOM = { untrusted: 0, 'on-request': 1, never: 1 } satisfies Record<typeof CodexApprovalPolicy.Type, number>;
+const SANDBOX_FREEDOM = { 'read-only': 0, 'workspace-write': 1, 'danger-full-access': 2 } satisfies Record<CodexSandboxMode, number>;
+
+/** Whether `override` asks no less, and touches no more, than `builtIn`. */
+export function codexNoLooser(override: CodexPolicy, builtIn: CodexPolicy): boolean {
+  return (
+    APPROVAL_FREEDOM[override.approvalPolicy] <= APPROVAL_FREEDOM[builtIn.approvalPolicy] &&
+    SANDBOX_FREEDOM[override.sandbox] <= SANDBOX_FREEDOM[builtIn.sandbox]
+  );
+}
+
+/**
  * Codex has no setting that applies edits freely but asks before every command: `on-request` runs
  * commands in the sandbox without asking. So Auto-edit falls back to the more restrictive
  * `untrusted`, which asks before edits and commands alike.

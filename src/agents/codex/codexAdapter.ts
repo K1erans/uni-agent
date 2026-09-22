@@ -1,6 +1,6 @@
 import { Effect, Option, Predicate, Schema, type Deferred, type Scope } from 'effect';
 import { Ids } from '../../ids';
-import { notSignedInMessage, type AdapterOptions } from '../adapter';
+import { notSignedInMessage, type AdapterOptions, type ModeChangeFailed } from '../adapter';
 import type { AgentErrorCode, ContentBlock, StopReason, ToolCall } from '../events';
 import { Executables } from '../findExecutable';
 import { ModeSettings } from '../modes';
@@ -9,7 +9,7 @@ import { AgentFailure, CLIENT_INFO, JsonRpcAdapter, type OpenedSession, type Tur
 import { Stdio } from '../stdio';
 import { WireMessage } from '../traffic';
 import { Turn, type ChunkKind } from '../turn';
-import { CodexModeOverrides, codexPolicy, sandboxPolicy } from './codexModes';
+import { CodexModeOverrides, codexNoLooser, codexPolicy, sandboxPolicy } from './codexModes';
 import { AvailableDecisions, CODEX_CANCELLED, codexApproval, ThreadItem, toolCallOf, type CodexApproval, type ItemLifecycle } from './codexItems';
 
 // The parts of Codex's app-server protocol the adapter reads (`codex app-server generate-ts`).
@@ -142,7 +142,7 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
     return Effect.gen(this, function* () {
       const input = prompt.map((block) => ({ type: 'text', text: block.text, text_elements: [] }));
       // Every turn names its policy, so a mode changed since the last turn applies to this one.
-      const { approvalPolicy, sandbox } = yield* this.native(codexPolicy, CodexModeOverrides);
+      const { approvalPolicy, sandbox } = yield* this.native(codexPolicy, CodexModeOverrides, codexNoLooser);
       const started = yield* rpc.request('turn/start', { threadId, input, approvalPolicy, sandboxPolicy: sandboxPolicy(sandbox) }, TurnStarted);
       turn.codexTurnId = started.turn.id;
       // A cancel that arrived before Codex named the turn could not interrupt it then.
@@ -153,7 +153,7 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
   }
 
   /** Codex takes its approval policy and sandbox with each turn, so a new mode applies from the next one. */
-  protected applyMode(): Effect.Effect<void> {
+  protected applyMode(): Effect.Effect<void, ModeChangeFailed> {
     return Effect.void;
   }
 

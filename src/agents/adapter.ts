@@ -20,9 +20,10 @@ export interface AgentAdapter {
 
   /**
    * Switches the session to `mode`, mapped onto the agent's own settings. It applies to the running
-   * session as soon as the agent allows, and at the latest from the next turn.
+   * session as soon as the agent allows, and at the latest from the next turn. If the running agent
+   * refuses the switch, the adapter keeps its previous mode and fails.
    */
-  setMode(mode: Mode): Effect.Effect<void>;
+  setMode(mode: Mode): Effect.Effect<void, ModeChangeFailed>;
 }
 
 /** Receives every event an adapter emits, in order. */
@@ -60,6 +61,13 @@ export function binaryMissingMessage(agent: AgentKind, command: string, executab
 }
 
 /** An answer named a permission request that is not open (unknown, or already answered) or an option it does not offer. */
+/** The running agent refused to switch to a mode, so it still runs in the one it had. */
+export class ModeChangeFailed extends Data.TaggedError('ModeChangeFailed')<{
+  readonly agent: AgentKind;
+  readonly mode: Mode;
+  readonly reason: string;
+}> {}
+
 export class UnknownPermissionRequest extends Data.TaggedError('UnknownPermissionRequest')<{
   readonly requestId: string;
   readonly optionId: string;

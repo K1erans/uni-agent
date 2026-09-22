@@ -1,6 +1,6 @@
 import { Clock, Effect, type Scope } from 'effect';
 import type { MakeAdapter } from './agents/adapter';
-import { DEFAULT_MODE, type Mode } from './agents/events';
+import { AGENT_NAMES, DEFAULT_MODE, MODE_NAMES, type Mode } from './agents/events';
 import { threadTitle, type ExtensionMessage, type ThreadEvent, type ThreadInfo } from './protocol';
 
 /** Where a thread's agent runs. */
@@ -38,7 +38,10 @@ export interface Thread {
   prompt(text: string): Effect.Effect<void>;
   /** Answers a permission request the agent is waiting on; an answer it cannot place is logged and dropped. */
   respond(requestId: string, optionId: string): Effect.Effect<void>;
-  /** Switches the thread's mode, including mid-turn, and tells the connected webview. Checking Full auto is allowed is the caller's job. */
+  /**
+   * Switches the thread's mode, including mid-turn, and tells the connected webview. If the agent
+   * refuses, the thread keeps its mode and logs why. Checking Full auto is allowed is the caller's job.
+   */
   setMode(mode: Mode): Effect.Effect<void>;
 }
 
@@ -139,10 +142,19 @@ export function makeThread<R>(
           Effect.logDebug(`Ignored an answer for permission request ${error.requestId} of thread ${id}`)
         ),
       setMode: (next) =>
-        Effect.suspend(() => {
-          mode = next;
-          return Effect.zipRight(adapter.setMode(next), post ? post({ type: 'mode', threadId: id, mode: next }) : Effect.void);
-        }),
+        adapter.setMode(next).pipe(
+          // Only a switch the agent accepted is shown: the webview must never show a stricter mode
+          // than the agent really runs in.
+          Effect.zipRight(
+            Effect.suspend(() => {
+              mode = next;
+              return post ? post({ type: 'mode', threadId: id, mode: next }) : Effect.void;
+            })
+          ),
+          Effect.catchTag('ModeChangeFailed', (error) =>
+            Effect.logWarning(`${AGENT_NAMES[error.agent]} refused to switch thread ${id} to ${MODE_NAMES[error.mode]}; it keeps ${MODE_NAMES[mode]}: ${error.reason}`)
+          )
+        ),
     };
   });
 }

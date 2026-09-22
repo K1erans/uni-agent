@@ -1,8 +1,8 @@
 import { Option, Schema } from 'effect';
 import { describe, expect, it } from 'vitest';
-import { ClaudeModeOverrides, claudePermissionMode } from './claude/claudeModes';
-import { CodexModeOverrides, codexPolicy, sandboxPolicy } from './codex/codexModes';
-import { CursorModeOverrides, cursorModeId, cursorSessionMode } from './cursor/cursorModes';
+import { ClaudeModeOverrides, claudeNoLooser, claudePermissionMode } from './claude/claudeModes';
+import { CodexModeOverrides, codexNoLooser, codexPolicy, sandboxPolicy } from './codex/codexModes';
+import { CursorModeOverrides, cursorModeId, cursorNoLooser, cursorSessionMode } from './cursor/cursorModes';
 import { nativeMode } from './modes';
 import type { WireMessage } from './traffic';
 
@@ -13,6 +13,16 @@ describe('Claude mode mapping', () => {
     ['full_auto', 'bypassPermissions'],
   ] as const)('runs %s in the %s permission mode', (mode, native) => {
     expect(claudePermissionMode(mode)).toBe(native);
+  });
+});
+
+describe('Claude override limits', () => {
+  it('allows only permission modes that let Claude do no more without asking', () => {
+    expect(claudeNoLooser('default', 'acceptEdits')).toBe(true);
+    expect(claudeNoLooser('dontAsk', 'plan')).toBe(false);
+    expect(claudeNoLooser('auto', 'acceptEdits')).toBe(false);
+    expect(claudeNoLooser('bypassPermissions', 'plan')).toBe(false);
+    expect(claudeNoLooser('bypassPermissions', 'bypassPermissions')).toBe(true);
   });
 });
 
@@ -30,6 +40,19 @@ describe('Codex mode mapping', () => {
     expect(sandboxPolicy('read-only')).toEqual({ type: 'readOnly', networkAccess: false });
     expect(sandboxPolicy('workspace-write')).toMatchObject({ type: 'workspaceWrite', writableRoots: [], networkAccess: false });
     expect(sandboxPolicy('danger-full-access')).toEqual({ type: 'dangerFullAccess' });
+  });
+});
+
+describe('Codex override limits', () => {
+  it('allows only policies that ask no less and touch no more', () => {
+    const plan = codexPolicy('plan');
+    const autoEdit = codexPolicy('auto_edit');
+
+    expect(codexNoLooser({ approvalPolicy: 'on-request', sandbox: 'read-only' }, plan)).toBe(true);
+    expect(codexNoLooser({ approvalPolicy: 'never', sandbox: 'danger-full-access' }, plan)).toBe(false);
+    // Asks less than untrusted, though in the same sandbox.
+    expect(codexNoLooser({ approvalPolicy: 'on-request', sandbox: 'workspace-write' }, autoEdit)).toBe(false);
+    expect(codexNoLooser({ approvalPolicy: 'untrusted', sandbox: 'read-only' }, autoEdit)).toBe(true);
   });
 });
 
@@ -67,13 +90,28 @@ describe('Cursor mode mapping', () => {
 /** Decodes a raw `modeOverrides` setting as `readSetting` does. */
 const decode = <A, I>(schema: Schema.Schema<A, I>, value: WireMessage) => Schema.decodeUnknownOption(schema)(value);
 
+describe('Cursor override limits', () => {
+  it('allows only known session modes no less restrictive than the built-in one', () => {
+    expect(cursorNoLooser('ask', 'plan')).toBe(true);
+    expect(cursorNoLooser('plan', 'agent')).toBe(true);
+    expect(cursorNoLooser('agent', 'plan')).toBe(false);
+    expect(cursorNoLooser('yolo', 'agent')).toBe(false);
+  });
+});
+
 describe('Mode overrides', () => {
   it('uses the override for a mode that names one, and the built-in mapping for the rest', () => {
     const overrides = Option.some({ auto_edit: 'default' as const });
 
-    expect(nativeMode('auto_edit', claudePermissionMode, overrides)).toBe('default');
-    expect(nativeMode('plan', claudePermissionMode, overrides)).toBe('plan');
-    expect(nativeMode('full_auto', claudePermissionMode, Option.none())).toBe('bypassPermissions');
+    expect(nativeMode('auto_edit', claudePermissionMode, overrides, claudeNoLooser)).toEqual({ native: 'default', ignored: Option.none() });
+    expect(nativeMode('plan', claudePermissionMode, overrides, claudeNoLooser)).toEqual({ native: 'plan', ignored: Option.none() });
+    expect(nativeMode('full_auto', claudePermissionMode, Option.none(), claudeNoLooser)).toEqual({ native: 'bypassPermissions', ignored: Option.none() });
+  });
+
+  it('ignores an override that would give a mode more freedom than its built-in setting', () => {
+    const overrides = Option.some({ plan: 'bypassPermissions' as const });
+
+    expect(nativeMode('plan', claudePermissionMode, overrides, claudeNoLooser)).toEqual({ native: 'plan', ignored: Option.some('bypassPermissions') });
   });
 
   it('accepts each agent’s own native values', () => {

@@ -90,7 +90,7 @@ export abstract class JsonRpcAdapter<T extends Turn> extends BaseAdapter<T> {
   }
 
   /** Runs `f` against the open session, if there is one. */
-  protected withSession(f: (rpc: JsonRpcConnection, sessionId: string) => Effect.Effect<void>): Effect.Effect<void> {
+  protected withSession<E>(f: (rpc: JsonRpcConnection, sessionId: string) => Effect.Effect<void, E>): Effect.Effect<void, E> {
     return Effect.suspend(() => {
       const { connection, sessionId } = this;
       return connection && sessionId !== undefined ? f(connection.rpc, sessionId) : Effect.void;

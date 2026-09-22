@@ -1,6 +1,6 @@
 import { Effect, Option, Schema, type Deferred, type Scope } from 'effect';
 import { Ids } from '../../ids';
-import { notSignedInMessage, type AdapterOptions } from '../adapter';
+import { ModeChangeFailed, notSignedInMessage, type AdapterOptions } from '../adapter';
 import { ContentBlock, MODE_NAMES, PermissionOption, StopReason, ToolCallStatus, ToolKind, type ToolCall, type ToolCallContent } from '../events';
 import { Executables } from '../findExecutable';
 import { ModeSettings } from '../modes';
@@ -9,7 +9,7 @@ import { AgentFailure, CLIENT_INFO, JsonRpcAdapter, type OpenedSession, type Tur
 import { Stdio } from '../stdio';
 import { WireMessage } from '../traffic';
 import { Turn, type ChunkKind } from '../turn';
-import { CursorModeOverrides, cursorModeId, cursorSessionMode } from './cursorModes';
+import { CursorModeOverrides, cursorModeId, cursorNoLooser, cursorSessionMode } from './cursorModes';
 
 // The parts of the Agent Client Protocol (https://agentclientprotocol.com) the adapter reads.
 
@@ -156,10 +156,13 @@ export class CursorAdapter extends JsonRpcAdapter<CursorTurn> {
     );
   }
 
-  /** Switches the open session now; a failure is retried, and reported, with the next prompt. */
-  protected applyMode(): Effect.Effect<void> {
+  /**
+   * Switches the open session now. If Cursor refuses, it fails, so the thread keeps showing the mode
+   * the session still runs in; the next prompt tries the switch again before it runs.
+   */
+  protected applyMode(): Effect.Effect<void, ModeChangeFailed> {
     return this.withSession((rpc, sessionId) =>
-      this.switchMode(rpc, sessionId).pipe(Effect.catchAll((error) => Effect.logWarning('Could not switch the Cursor session mode', error)))
+      Effect.mapError(this.switchMode(rpc, sessionId), (error) => new ModeChangeFailed({ agent: this.agent, mode: this.mode, reason: error._tag === 'ConnectionClosed' ? error.reason : error.message }))
     );
   }
 
@@ -184,7 +187,7 @@ export class CursorAdapter extends JsonRpcAdapter<CursorTurn> {
    */
   private switchMode(rpc: JsonRpcConnection, sessionId: string): Effect.Effect<void, TurnError> {
     return Effect.gen(this, function* () {
-      const wanted = yield* this.native(cursorModeId, CursorModeOverrides);
+      const wanted = yield* this.native(cursorModeId, CursorModeOverrides, cursorNoLooser);
       const { current, available } = this.sessionMode;
       const modeId = Option.match(available, { onNone: () => Option.some(wanted), onSome: (offered) => cursorSessionMode(wanted, offered) });
       if (Option.isNone(modeId)) {

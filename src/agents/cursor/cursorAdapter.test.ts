@@ -1,7 +1,8 @@
-import { Effect } from 'effect';
+import { Effect, Either } from 'effect';
 import { describe, expect, it, vi } from 'vitest';
 import { modeSettings } from '../../testing/modeSettings';
-import { agentRequest, answer, exit, methodNotFound, notification, notify, request, result, setupAdapter } from '../../testing/stdioFixtures';
+import { agentRequest, answer, exit, methodNotFound, notification, notify, request, result, rpcError, setupAdapter } from '../../testing/stdioFixtures';
+import { ModeChangeFailed } from '../adapter';
 import { CLIENT_INFO } from '../jsonRpcAdapter';
 import type { TrafficLine, WireMessage } from '../traffic';
 import { CursorAdapter } from './cursorAdapter';
@@ -310,6 +311,39 @@ describe('CursorAdapter', () => {
       await Effect.runPromise(setup.adapter.setMode('plan'));
       expect(await setup.prompt('look')).toBe('end_turn');
       expect(setup.errors()).toEqual([]);
+    });
+
+    it('fails, keeping its mode, when Cursor refuses to switch the open session', async () => {
+      const setup = setupAdapter(CursorAdapter.make, [
+        [
+          ...offering('agent', 'plan'),
+          prompt(3, 'hi'),
+          result(3, { stopReason: 'end_turn' }),
+          request(4, 'session/set_mode', { sessionId: SESSION, modeId: 'plan' }),
+          rpcError(4, -32603, 'Cannot switch mode now'),
+          prompt(5, 'again'),
+          result(5, { stopReason: 'end_turn' }),
+        ],
+      ]);
+      expect(await setup.prompt('hi')).toBe('end_turn');
+
+      const refused = await Effect.runPromise(Effect.either(setup.adapter.setMode('plan')));
+
+      expect(refused).toEqual(Either.left(new ModeChangeFailed({ agent: 'cursor', mode: 'plan', reason: 'Cannot switch mode now' })));
+      // Still in Auto-edit, so the next prompt runs in the agent session mode it already has.
+      expect(await setup.prompt('again')).toBe('end_turn');
+    });
+
+    it('ignores an override that would give a mode more freedom than its built-in setting', async () => {
+      const setup = setupAdapter(
+        CursorAdapter.make,
+        [[...offering('agent', 'plan'), ...setMode(3, 'plan'), prompt(4, 'look'), result(4, { stopReason: 'end_turn' })]],
+        undefined,
+        undefined,
+        { mode: 'plan', settings: modeSettings({ cursor: { plan: 'agent' } }) }
+      );
+
+      expect(await setup.prompt('look')).toBe('end_turn');
     });
 
     it('runs in the nearest more restrictive mode when the agent does not offer the one wanted', async () => {

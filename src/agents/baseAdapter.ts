@@ -1,8 +1,8 @@
 import { Deferred, Effect, Option, type Context, type Schema, type Scope } from 'effect';
 import type { Ids } from '../ids';
-import { binaryMissingMessage, TurnInProgress, type AdapterOptions, type AgentAdapter, type UnknownPermissionRequest } from './adapter';
+import { binaryMissingMessage, TurnInProgress, type AdapterOptions, type AgentAdapter, type ModeChangeFailed, type UnknownPermissionRequest } from './adapter';
 import { Approvals } from './approvals';
-import { AGENT_NAMES, type AgentEvent, type AgentKind, type ContentBlock, type Mode, type StopReason } from './events';
+import { AGENT_NAMES, MODE_NAMES, type AgentEvent, type AgentKind, type ContentBlock, type Mode, type StopReason } from './events';
 import type { Executables } from './findExecutable';
 import { nativeMode, type ModeOverrides, type ModeSettings } from './modes';
 import type { Turn } from './turn';
@@ -50,7 +50,7 @@ export abstract class BaseAdapter<T extends Turn> implements AgentAdapter {
   protected abstract stop(): Effect.Effect<void>;
 
   /** Applies `this.mode` to the running agent, if any; an agent that starts later starts in it. */
-  protected abstract applyMode(): Effect.Effect<void>;
+  protected abstract applyMode(): Effect.Effect<void, ModeChangeFailed>;
 
   /** Called by `make` once the adapter is built: stops the agent with the scope and reports a missing CLI. */
   protected start(): Effect.Effect<void, never, Scope.Scope> {
@@ -100,19 +100,34 @@ export abstract class BaseAdapter<T extends Turn> implements AgentAdapter {
     return this.approvals.respond(requestId, optionId);
   }
 
-  setMode(mode: Mode): Effect.Effect<void> {
+  setMode(mode: Mode): Effect.Effect<void, ModeChangeFailed> {
     return Effect.suspend(() => {
+      const previous = this.mode;
       this.mode = mode;
-      return this.applyMode();
+      // A refused switch leaves the agent in the previous mode, so the adapter says so too.
+      return Effect.tapError(this.applyMode(), () => Effect.sync(() => (this.mode = previous)));
     });
   }
 
   /**
    * The agent's native settings for the current mode: the user's override for it, if the agent's
-   * `modeOverrides` setting names one, otherwise `builtIn`'s.
+   * `modeOverrides` setting names one no looser than the built-in setting, otherwise `builtIn`'s.
    */
-  protected native<A, I>(builtIn: (mode: Mode) => A, overrides: Schema.Schema<ModeOverrides<A>, I>): Effect.Effect<A> {
-    return Effect.map(this.modeSettings.overrides(this.agent, overrides), (set) => nativeMode(this.mode, builtIn, set));
+  protected native<A, I>(
+    builtIn: (mode: Mode) => A,
+    overrides: Schema.Schema<ModeOverrides<A>, I>,
+    noLooser: (override: A, builtIn: A) => boolean
+  ): Effect.Effect<A> {
+    return Effect.gen(this, function* () {
+      const { native, ignored } = nativeMode(this.mode, builtIn, yield* this.modeSettings.overrides(this.agent, overrides), noLooser);
+      if (Option.isSome(ignored)) {
+        yield* Effect.logWarning(
+          `Ignored the ${AGENT_NAMES[this.agent]} override for ${MODE_NAMES[this.mode]}, which would allow more than the mode does`,
+          ignored.value
+        );
+      }
+      return native;
+    });
   }
 
   /** Ends `turn` if it is still the running one. */

@@ -122,6 +122,19 @@ describe('Thread', () => {
     expect(post).toHaveBeenLastCalledWith({ type: 'mode', threadId: 'thread-1', mode: 'plan' });
   });
 
+  it('keeps its mode, and tells the webview nothing, when the agent refuses a switch', async () => {
+    const { thread, adapter, attach, prompt } = setup();
+    const post = vi.fn();
+    attach(post);
+    await prompt('hi');
+    adapter.refusesModes = true;
+
+    await Effect.runPromise(thread.setMode('plan'));
+
+    expect(thread.mode).toBe('auto_edit');
+    expect(post).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'mode' }));
+  });
+
   it('stops the adapter when its scope closes', async () => {
     const { adapter, close } = setup();
     await close();

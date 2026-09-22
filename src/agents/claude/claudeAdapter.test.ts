@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { Ids } from '../../ids';
 import { recordingSink, type Answer } from '../../testing/eventSink';
 import { modeSettings } from '../../testing/modeSettings';
-import { TurnInProgress, UnknownPermissionRequest } from '../adapter';
+import { ModeChangeFailed, TurnInProgress, UnknownPermissionRequest } from '../adapter';
 import { DEFAULT_MODE, type AgentEvent, type Mode } from '../events';
 import { Executables } from '../findExecutable';
 import { ModeSettings } from '../modes';
@@ -83,6 +83,8 @@ interface SetupOptions {
   mode?: Mode;
   /** The mode settings the adapter reads; defaults to no overrides. */
   settings?: Layer.Layer<ModeSettings>;
+  /** Makes running Claude processes refuse every permission mode switch. */
+  refuseSwitch?: boolean;
 }
 
 /**
@@ -97,6 +99,7 @@ function setup(
     answer,
     mode = DEFAULT_MODE,
     settings = ModeSettings.none,
+    refuseSwitch = false,
   }: SetupOptions = {}
 ) {
   const events: AgentEvent[] = [];
@@ -110,7 +113,15 @@ function setup(
       query: (params) => {
         started.push(params.options);
         const query = replayQuery(sessions.shift() ?? [])(params);
-        return { ...query, setPermissionMode: async (permissionMode) => void switched.push(permissionMode) };
+        return {
+          ...query,
+          setPermissionMode: async (permissionMode) => {
+            if (refuseSwitch) {
+              throw new Error('Cannot change permission mode now');
+            }
+            switched.push(permissionMode);
+          },
+        };
       },
     }),
     Layer.succeed(Executables, { find: (_name, override) => Effect.sync(() => findClaude(override)) }),
@@ -479,6 +490,39 @@ describe('ClaudeAdapter', () => {
     });
     await invalid.prompt('hi');
     expect(invalid.started[0]).toMatchObject({ permissionMode: 'acceptEdits' });
+  });
+
+  it('fails, keeping its mode, when the running Claude refuses a switch', async () => {
+    const { adapter, started, prompt } = setup(
+      [
+        [
+          { dir: 'send', data: userMessage('one') },
+          { dir: 'recv', data: result() },
+          { dir: 'send', data: userMessage('two') },
+          { dir: 'recv', data: result() },
+        ],
+      ],
+      { mode: 'plan', refuseSwitch: true }
+    );
+    await prompt('one');
+
+    const refused = await Effect.runPromise(Effect.either(adapter.setMode('auto_edit')));
+
+    expect(refused).toEqual(Either.left(new ModeChangeFailed({ agent: 'claude', mode: 'auto_edit', reason: 'Cannot change permission mode now' })));
+    // The next prompt runs in the same process, which is still in plan mode.
+    await prompt('two');
+    expect(started).toHaveLength(1);
+    expect(started[0]).toMatchObject({ permissionMode: 'plan' });
+  });
+
+  it('ignores an override that would give a mode more freedom than its built-in setting', async () => {
+    const { started, prompt } = setup([[{ dir: 'send', data: userMessage('hi') }, { dir: 'recv', data: result() }]], {
+      mode: 'plan',
+      settings: modeSettings({ claude: { plan: 'bypassPermissions' } }),
+    });
+
+    await prompt('hi');
+    expect(started[0]).toMatchObject({ permissionMode: 'plan', allowDangerouslySkipPermissions: false });
   });
 
   it('refuses a second prompt while a turn is running', async () => {
