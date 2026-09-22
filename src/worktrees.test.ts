@@ -26,6 +26,13 @@ describe('worktree isolation', () => {
       expect(review.status).toContain('file.txt');
       expect(review.diffStat).toContain('file.txt');
       expect(await fs.readFile(path.join(repo, 'file.txt'), 'utf8')).toBe('before\n');
+
+      await fs.writeFile(path.join(worktree.path, 'file.txt'), 'before\n');
+      await fs.writeFile(path.join(worktree.path, 'new-file.txt'), 'delegated result\n');
+      const withNewFile = await Effect.runPromise(inspectWorktree(worktree).pipe(Effect.provide(GitRunner.live)));
+      expect(withNewFile.status).toContain('new-file.txt');
+      expect(withNewFile.diffStat).toContain('new-file.txt');
+      expect(withNewFile.diffStat).toContain('new file');
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

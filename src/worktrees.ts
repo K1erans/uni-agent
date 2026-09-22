@@ -75,12 +75,16 @@ async function canonicalPath(target: string): Promise<string> {
   }
 }
 
-/** Reports tracked changes against the starting commit; status also lists untracked paths. */
+/** Reports tracked changes against the starting commit and lists new files in the diff summary. */
 export function inspectWorktree(worktree: Worktree): Effect.Effect<{ readonly status: string; readonly diffStat: string }, GitFailed, GitRunner> {
   return Effect.gen(function* () {
     const git = yield* GitRunner;
     const status = yield* git.run(worktree.path, ['status', '--short']);
-    const diffStat = yield* git.run(worktree.path, ['diff', '--stat', worktree.base]);
+    const trackedStat = yield* git.run(worktree.path, ['diff', '--stat', worktree.base]);
+    const untracked = (yield* git.run(worktree.path, ['ls-files', '--others', '--exclude-standard', '-z']))
+      .split('\0').filter((file) => file.length > 0);
+    const newFiles = untracked.map((file) => `${JSON.stringify(file)} | new file`).join('\n');
+    const diffStat = [trackedStat, newFiles].filter((part) => part.length > 0).join('\n');
     return { status, diffStat };
   });
 }
