@@ -1,11 +1,13 @@
-import type { Options } from '@anthropic-ai/claude-agent-sdk';
+import type { Options, PermissionMode } from '@anthropic-ai/claude-agent-sdk';
 import { Effect, Either, Exit, Layer, Option, Scope } from 'effect';
 import { describe, expect, it, vi } from 'vitest';
 import { Ids } from '../../ids';
 import { recordingSink, type Answer } from '../../testing/eventSink';
+import { modeSettings } from '../../testing/modeSettings';
 import { TurnInProgress, UnknownPermissionRequest } from '../adapter';
-import type { AgentEvent } from '../events';
+import { DEFAULT_MODE, type AgentEvent, type Mode } from '../events';
 import { Executables } from '../findExecutable';
+import { ModeSettings } from '../modes';
 import type { TrafficLine, WireMessage } from '../traffic';
 import { ClaudeAdapter, ClaudeSdk } from './claudeAdapter';
 import { replayQuery } from './claudeTraffic';
@@ -77,6 +79,10 @@ interface SetupOptions {
   findClaude?: (override: Option.Option<string>) => Option.Option<string>;
   /** How the user answers a permission request; no answer leaves the request open. */
   answer?: Answer;
+  /** The mode the adapter starts in; defaults to Auto-edit. */
+  mode?: Mode;
+  /** The mode settings the adapter reads; defaults to no overrides. */
+  settings?: Layer.Layer<ModeSettings>;
 }
 
 /**
@@ -85,27 +91,37 @@ interface SetupOptions {
  */
 function setup(
   traffic: TrafficLine[][],
-  { executablePath = Option.none(), findClaude = () => Option.some('/usr/local/bin/claude'), answer }: SetupOptions = {}
+  {
+    executablePath = Option.none(),
+    findClaude = () => Option.some('/usr/local/bin/claude'),
+    answer,
+    mode = DEFAULT_MODE,
+    settings = ModeSettings.none,
+  }: SetupOptions = {}
 ) {
   const events: AgentEvent[] = [];
   const started: Options[] = [];
+  /** The permission modes the adapter switched running Claude processes to. */
+  const switched: PermissionMode[] = [];
   const sessions = [...traffic];
   let id = 0;
   const services = Layer.mergeAll(
     Layer.succeed(ClaudeSdk, {
       query: (params) => {
         started.push(params.options);
-        return replayQuery(sessions.shift() ?? [])(params);
+        const query = replayQuery(sessions.shift() ?? [])(params);
+        return { ...query, setPermissionMode: async (permissionMode) => void switched.push(permissionMode) };
       },
     }),
     Layer.succeed(Executables, { find: (_name, override) => Effect.sync(() => findClaude(override)) }),
-    Layer.succeed(Ids, { next: Effect.sync(() => (id++ === 0 ? SESSION_ID : `turn-${id - 1}`)) })
+    Layer.succeed(Ids, { next: Effect.sync(() => (id++ === 0 ? SESSION_ID : `turn-${id - 1}`)) }),
+    settings
   );
   const scope = Effect.runSync(Scope.make());
   // The sink reaches the adapter to answer its asks, and only ever runs once it has been built.
   let built: ClaudeAdapter | undefined;
   built = Effect.runSync(
-    ClaudeAdapter.make({ cwd: '/workspace', executablePath, onEvent: recordingSink(events, answer, () => built) }).pipe(
+    ClaudeAdapter.make({ cwd: '/workspace', executablePath, mode, onEvent: recordingSink(events, answer, () => built) }).pipe(
       Scope.extend(scope),
       Effect.provide(services)
     )
@@ -113,7 +129,8 @@ function setup(
   const adapter = built;
   const prompt = (text: string) => Effect.runPromise(adapter.prompt([{ type: 'text', text }]));
   const dispose = () => Effect.runPromise(Scope.close(scope, Exit.void));
-  return { adapter, events, started, prompt, dispose };
+  const errors = () => events.filter((event) => event.type === 'error');
+  return { adapter, events, started, switched, prompt, dispose, errors };
 }
 
 /** The tool call updates in the events, as the adapter sent them. */
@@ -406,6 +423,62 @@ describe('ClaudeAdapter', () => {
     expect(await prompt('second')).toBe('end_turn');
     expect(started[1]).toMatchObject({ resume: SESSION_ID });
     expect(started[1].sessionId).toBeUndefined();
+  });
+
+  it('starts Claude in the permission mode its mode maps to', async () => {
+    const { started, prompt } = setup([[{ dir: 'send', data: userMessage('look') }, { dir: 'recv', data: result() }]], { mode: 'plan' });
+
+    await prompt('look');
+    expect(started[0]).toMatchObject({ permissionMode: 'plan' });
+    expect(started[0].allowDangerouslySkipPermissions).toBe(false);
+  });
+
+  it('switches the running Claude to a new mode straight away', async () => {
+    const { adapter, started, switched, prompt } = setup([[{ dir: 'send', data: userMessage('hi') }, { dir: 'recv', data: result() }]]);
+    await Effect.runPromise(adapter.setMode('plan'));
+    expect(switched).toEqual([]);
+
+    await prompt('hi');
+    await Effect.runPromise(adapter.setMode('auto_edit'));
+
+    expect(started[0]).toMatchObject({ permissionMode: 'plan' });
+    expect(switched).toEqual(['acceptEdits']);
+  });
+
+  it('restarts Claude able to bypass permissions for the first prompt in Full auto, resuming the session', async () => {
+    const { adapter, started, switched, prompt, errors } = setup([
+      [{ dir: 'send', data: userMessage('one') }, { dir: 'recv', data: result() }],
+      [{ dir: 'send', data: userMessage('two') }, { dir: 'recv', data: result() }],
+    ]);
+    await prompt('one');
+
+    // A Claude started without it cannot switch into bypassing permissions, so it keeps its mode until then.
+    await Effect.runPromise(adapter.setMode('full_auto'));
+    expect(switched).toEqual([]);
+    expect(started).toHaveLength(1);
+
+    await prompt('two');
+    expect(started[1]).toMatchObject({ permissionMode: 'bypassPermissions', allowDangerouslySkipPermissions: true, resume: SESSION_ID });
+    expect(errors()).toEqual([]);
+
+    // Once able to, it switches back and forth without restarting.
+    await Effect.runPromise(adapter.setMode('plan'));
+    await Effect.runPromise(adapter.setMode('full_auto'));
+    expect(switched).toEqual(['plan', 'bypassPermissions']);
+  });
+
+  it('uses the permission mode the modeOverrides setting names, and ignores an invalid setting', async () => {
+    const overridden = setup([[{ dir: 'send', data: userMessage('hi') }, { dir: 'recv', data: result() }]], {
+      settings: modeSettings({ claude: { auto_edit: 'default' } }),
+    });
+    await overridden.prompt('hi');
+    expect(overridden.started[0]).toMatchObject({ permissionMode: 'default' });
+
+    const invalid = setup([[{ dir: 'send', data: userMessage('hi') }, { dir: 'recv', data: result() }]], {
+      settings: modeSettings({ claude: { auto_edit: 'yolo' } }),
+    });
+    await invalid.prompt('hi');
+    expect(invalid.started[0]).toMatchObject({ permissionMode: 'acceptEdits' });
   });
 
   it('refuses a second prompt while a turn is running', async () => {

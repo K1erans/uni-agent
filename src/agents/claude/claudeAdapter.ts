@@ -2,6 +2,7 @@ import {
   query as sdkQuery,
   type CanUseTool,
   type Options,
+  type PermissionMode,
   type PermissionResult,
   type Query,
   type SDKAssistantMessage,
@@ -16,12 +17,14 @@ import { notSignedInMessage, type AdapterOptions } from '../adapter';
 import { BaseAdapter } from '../baseAdapter';
 import type { AgentErrorCode, ContentBlock, StopReason, ToolCall, ToolCallStatus } from '../events';
 import { Executables } from '../findExecutable';
+import { ModeSettings } from '../modes';
 import { WireMessage } from '../traffic';
 import { Turn } from '../turn';
+import { ClaudeModeOverrides, claudePermissionMode } from './claudeModes';
 import { describeTool, permissionOptions, ToolResultContent, toolResultContent } from './claudeTools';
 
 /** The part of the Agent SDK's `Query` the adapter uses; lets tests substitute a fake agent. */
-export type ClaudeQuery = AsyncIterable<SDKMessage> & Pick<Query, 'interrupt' | 'close'>;
+export type ClaudeQuery = AsyncIterable<SDKMessage> & Pick<Query, 'interrupt' | 'close' | 'setPermissionMode'>;
 
 export type ClaudeQueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => ClaudeQuery;
 
@@ -45,6 +48,8 @@ class ClaudeTurn extends Turn {
 /** One running `claude` process, fed user messages through a streaming-input query. */
 class Connection {
   readonly query: ClaudeQuery;
+  /** Whether Claude was started able to bypass permissions; it cannot be switched into that mode otherwise. */
+  readonly canBypass: boolean;
   private readonly stderrTail: string[] = [];
 
   private constructor(
@@ -53,6 +58,7 @@ class Connection {
     options: Options,
     runtime: Runtime.Runtime<never>
   ) {
+    this.canBypass = options.allowDangerouslySkipPermissions === true;
     this.query = query({
       prompt: Stream.toAsyncIterable(Stream.fromQueue(input)),
       options: { ...options, stderr: (data) => Runtime.runSync(runtime, this.recordStderr(data)) },
@@ -78,6 +84,12 @@ class Connection {
     return Effect.tryPromise(() => this.query.interrupt()).pipe(
       Effect.asVoid,
       Effect.catchAll((error) => Effect.logWarning('Could not interrupt Claude Code', error))
+    );
+  }
+
+  setPermissionMode(mode: PermissionMode): Effect.Effect<void> {
+    return Effect.tryPromise(() => this.query.setPermissionMode(mode)).pipe(
+      Effect.catchAll((error) => Effect.logWarning(`Could not switch Claude Code to the ${mode} permission mode`, error))
     );
   }
 
@@ -126,15 +138,16 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
     private readonly sdk: Context.Tag.Service<ClaudeSdk>,
     executables: Context.Tag.Service<Executables>,
     ids: Context.Tag.Service<Ids>,
+    modeSettings: Context.Tag.Service<ModeSettings>,
     scope: Scope.Scope
   ) {
-    super(options, executables, ids, scope);
+    super(options, executables, ids, modeSettings, scope);
   }
 
-  static make(options: AdapterOptions): Effect.Effect<ClaudeAdapter, never, ClaudeSdk | Executables | Ids | Scope.Scope> {
+  static make(options: AdapterOptions): Effect.Effect<ClaudeAdapter, never, ClaudeSdk | Executables | Ids | ModeSettings | Scope.Scope> {
     return Effect.gen(function* () {
       const ids = yield* Ids;
-      const adapter = new ClaudeAdapter(yield* ids.next, options, yield* ClaudeSdk, yield* Executables, ids, yield* Effect.scope);
+      const adapter = new ClaudeAdapter(yield* ids.next, options, yield* ClaudeSdk, yield* Executables, ids, yield* ModeSettings, yield* Effect.scope);
       yield* adapter.emit({ type: 'session_started', agent: adapter.agent, sessionId: adapter.sessionId });
       yield* adapter.start();
       return adapter;
@@ -171,8 +184,37 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
     });
   }
 
+  /**
+   * Switches the running Claude to the mode's permission mode. Bypassing permissions needs a Claude
+   * started able to, so a Claude started without it keeps its current, more restrictive mode until
+   * the next prompt restarts it.
+   */
+  protected applyMode(): Effect.Effect<void> {
+    return Effect.gen(this, function* () {
+      const permissionMode = yield* this.permissionMode();
+      const connection = this.connection;
+      if (!connection) {
+        return;
+      }
+      if (permissionMode === 'bypassPermissions' && !connection.canBypass) {
+        return yield* Effect.logDebug('Claude Code switches to bypassing permissions when it restarts for the next prompt');
+      }
+      yield* connection.setPermissionMode(permissionMode);
+    });
+  }
+
+  private permissionMode(): Effect.Effect<PermissionMode> {
+    return this.native(claudePermissionMode, ClaudeModeOverrides);
+  }
+
   private connect(executable: string): Effect.Effect<Connection> {
     return Effect.gen(this, function* () {
+      const permissionMode = yield* this.permissionMode();
+      // Only a Claude started able to bypass permissions can, so one started without is restarted.
+      // The session exists by then, so the new process resumes it.
+      if (this.connection && permissionMode === 'bypassPermissions' && !this.connection.canBypass) {
+        yield* this.stop();
+      }
       if (this.connection) {
         return this.connection;
       }
@@ -180,6 +222,9 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
       const connection = yield* Connection.open(this.sdk.query, {
         cwd: this.options.cwd,
         pathToClaudeCodeExecutable: executable,
+        permissionMode,
+        // Claude is only started able to bypass permissions when it starts bypassing them.
+        allowDangerouslySkipPermissions: permissionMode === 'bypassPermissions',
         canUseTool: this.canUseTool(runtime),
         ...(this.sessionExists ? { resume: this.sessionId } : { sessionId: this.sessionId }),
         includePartialMessages: true,

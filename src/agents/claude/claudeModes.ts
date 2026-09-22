@@ -1,0 +1,21 @@
+import type { PermissionMode } from '@anthropic-ai/claude-agent-sdk';
+import { Schema } from 'effect';
+import type { Mode } from '../events';
+import { modeOverrides } from '../modes';
+
+/** Claude Code's permission modes, as `uniAgent.claude.modeOverrides` names them. */
+export const ClaudePermissionMode = Schema.Literal('default', 'acceptEdits', 'bypassPermissions', 'plan', 'dontAsk', 'auto') satisfies Schema.Schema<PermissionMode>;
+
+export const ClaudeModeOverrides = modeOverrides(ClaudePermissionMode);
+
+/** Claude has a permission mode for each of the three, so each maps onto its own. */
+export function claudePermissionMode(mode: Mode): PermissionMode {
+  switch (mode) {
+    case 'plan':
+      return 'plan';
+    case 'auto_edit':
+      return 'acceptEdits';
+    case 'full_auto':
+      return 'bypassPermissions';
+  }
+}

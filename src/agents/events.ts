@@ -15,6 +15,21 @@ export type AgentKind = typeof AgentKind.Type;
 
 export const AGENT_NAMES = { claude: 'Claude Code', codex: 'Codex', cursor: 'Cursor' } satisfies Record<AgentKind, string>;
 
+/**
+ * How freely a thread's agent may act, the same three choices for every agent. Each adapter maps
+ * the mode onto the agent's own permission settings.
+ * - `plan`: read-only investigation.
+ * - `auto_edit`: applies edits freely, but asks before running commands.
+ * - `full_auto`: asks for nothing. Only selectable once the user has opted in for the workspace.
+ */
+export const Mode = Schema.Literal('plan', 'auto_edit', 'full_auto');
+export type Mode = typeof Mode.Type;
+
+/** The mode a new thread starts in. */
+export const DEFAULT_MODE: Mode = 'auto_edit';
+
+export const MODE_NAMES = { plan: 'Plan', auto_edit: 'Auto-edit', full_auto: 'Full auto' } satisfies Record<Mode, string>;
+
 export const ContentBlock = Schema.Struct({ type: Schema.Literal('text'), text: Schema.String });
 export type ContentBlock = typeof ContentBlock.Type;
 

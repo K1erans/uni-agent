@@ -13,7 +13,7 @@ const chunk = (messageId: string, text: string, kind: 'agent_message_chunk' | 'a
 
 const turnStarted: AgentEvent = { type: 'turn_started', turnId: 't1', prompt: [{ type: 'text', text: 'Count to 3' }] };
 const thread: ThreadInfo = { id: 'thread-1', agent: 'claude', workspace: 'uni-agent' };
-const fold = (events: ThreadEvent[]): ThreadState => threadReducer(emptyThread, { type: 'history', thread, events });
+const fold = (events: ThreadEvent[]): ThreadState => threadReducer(emptyThread, { type: 'history', thread, mode: 'auto_edit', events });
 
 describe('threadState', () => {
   it('groups a turn’s prompt, thinking, reply and timing', () => {
@@ -188,8 +188,16 @@ describe('threadState', () => {
     const withBranch = threadReducer(shown, { type: 'branch', name: 'main' });
     expect(withBranch.branch).toBe('main');
 
-    const switched = threadReducer(withBranch, { type: 'history', thread: { id: 'thread-2', agent: 'claude', workspace: null }, events: [] });
-    expect(switched).toEqual({ ...emptyThread, thread: { id: 'thread-2', agent: 'claude', workspace: null } });
+    const switched = threadReducer(withBranch, { type: 'history', thread: { id: 'thread-2', agent: 'claude', workspace: null }, mode: 'plan', events: [] });
+    expect(switched).toEqual({ ...emptyThread, thread: { id: 'thread-2', agent: 'claude', workspace: null }, mode: 'plan' });
+  });
+
+  it('follows the mode the extension reports for the shown thread', () => {
+    const shown = fold([]);
+    expect(shown.mode).toBe('auto_edit');
+
+    expect(threadReducer(shown, { type: 'mode', threadId: 'thread-1', mode: 'plan' }).mode).toBe('plan');
+    expect(threadReducer(shown, { type: 'mode', threadId: 'thread-2', mode: 'plan' })).toBe(shown);
   });
 });
 

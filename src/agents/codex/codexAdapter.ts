@@ -3,11 +3,13 @@ import { Ids } from '../../ids';
 import { notSignedInMessage, type AdapterOptions } from '../adapter';
 import type { AgentErrorCode, ContentBlock, StopReason, ToolCall } from '../events';
 import { Executables } from '../findExecutable';
+import { ModeSettings } from '../modes';
 import { decodeMessage, type JsonRpcConnection, type MalformedMessage } from '../jsonRpc';
 import { AgentFailure, CLIENT_INFO, JsonRpcAdapter, type OpenedSession, type TurnError } from '../jsonRpcAdapter';
 import { Stdio } from '../stdio';
 import { WireMessage } from '../traffic';
 import { Turn, type ChunkKind } from '../turn';
+import { CodexModeOverrides, codexPolicy, sandboxPolicy } from './codexModes';
 import { AvailableDecisions, CODEX_CANCELLED, codexApproval, ThreadItem, toolCallOf, type CodexApproval, type ItemLifecycle } from './codexItems';
 
 // The parts of Codex's app-server protocol the adapter reads (`codex app-server generate-ts`).
@@ -107,9 +109,9 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
   protected readonly command = 'codex';
   protected readonly args = ['app-server'];
 
-  static make(options: AdapterOptions): Effect.Effect<CodexAdapter, never, Stdio | Executables | Ids | Scope.Scope> {
+  static make(options: AdapterOptions): Effect.Effect<CodexAdapter, never, Stdio | Executables | Ids | ModeSettings | Scope.Scope> {
     return Effect.gen(function* () {
-      const adapter = new CodexAdapter(options, yield* Stdio, yield* Executables, yield* Ids, yield* Effect.scope);
+      const adapter = new CodexAdapter(options, yield* Stdio, yield* Executables, yield* Ids, yield* ModeSettings, yield* Effect.scope);
       yield* adapter.start();
       return adapter;
     });
@@ -139,13 +141,20 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
   protected sendPrompt(rpc: JsonRpcConnection, threadId: string, turn: CodexTurn, prompt: ReadonlyArray<ContentBlock>): Effect.Effect<void, TurnError> {
     return Effect.gen(this, function* () {
       const input = prompt.map((block) => ({ type: 'text', text: block.text, text_elements: [] }));
-      const started = yield* rpc.request('turn/start', { threadId, input }, TurnStarted);
+      // Every turn names its policy, so a mode changed since the last turn applies to this one.
+      const { approvalPolicy, sandbox } = yield* this.native(codexPolicy, CodexModeOverrides);
+      const started = yield* rpc.request('turn/start', { threadId, input, approvalPolicy, sandboxPolicy: sandboxPolicy(sandbox) }, TurnStarted);
       turn.codexTurnId = started.turn.id;
       // A cancel that arrived before Codex named the turn could not interrupt it then.
       if (turn.cancelRequested) {
         yield* this.interrupt(turn);
       }
     });
+  }
+
+  /** Codex takes its approval policy and sandbox with each turn, so a new mode applies from the next one. */
+  protected applyMode(): Effect.Effect<void> {
+    return Effect.void;
   }
 
   protected interrupt(turn: CodexTurn): Effect.Effect<void> {

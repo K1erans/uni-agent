@@ -5,6 +5,7 @@ import { BaseAdapter } from './baseAdapter';
 import { AGENT_NAMES, type AgentErrorCode, type ContentBlock } from './events';
 import type { Executables } from './findExecutable';
 import { JsonRpcConnection, type ConnectionClosed, type MalformedMessage, type RpcError } from './jsonRpc';
+import type { ModeSettings } from './modes';
 import type { Stdio } from './stdio';
 import type { WireMessage } from './traffic';
 import type { Turn } from './turn';
@@ -52,9 +53,10 @@ export abstract class JsonRpcAdapter<T extends Turn> extends BaseAdapter<T> {
     private readonly stdio: Context.Tag.Service<Stdio>,
     executables: Context.Tag.Service<Executables>,
     ids: Context.Tag.Service<Ids>,
+    modeSettings: Context.Tag.Service<ModeSettings>,
     scope: Scope.Scope
   ) {
-    super(options, executables, ids, scope);
+    super(options, executables, ids, modeSettings, scope);
   }
 
   /** Initialises a new process and opens a session, resuming `resume` if given. */

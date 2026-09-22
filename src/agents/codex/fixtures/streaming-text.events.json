@@ -12,11 +12,11 @@
   {
     "type": "session_started",
     "agent": "codex",
-    "sessionId": "01a0bbbb-49b9-72f3-8304-a995c42e7eae"
+    "sessionId": "01a0cabe-7bd2-7481-95dc-faa17401a161"
   },
   {
     "type": "session_configured",
-    "model": "gpt-6-astra",
+    "model": "gpt-5.6-sol",
     "permissionMode": "on-request"
   },
   {
@@ -24,7 +24,7 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "agent_message_chunk",
-      "messageId": "msg_0f752e492043360a016aaf090c9bd887d29412f798a2406289",
+      "messageId": "msg_06c339c49c00b8d5016ab2e0e94aec87d2bf5287c0b050b7f5",
       "content": {
         "type": "text",
         "text": "1"
@@ -36,7 +36,7 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "agent_message_chunk",
-      "messageId": "msg_0f752e492043360a016aaf090c9bd887d29412f798a2406289",
+      "messageId": "msg_06c339c49c00b8d5016ab2e0e94aec87d2bf5287c0b050b7f5",
       "content": {
         "type": "text",
         "text": "\n"
@@ -48,7 +48,7 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "agent_message_chunk",
-      "messageId": "msg_0f752e492043360a016aaf090c9bd887d29412f798a2406289",
+      "messageId": "msg_06c339c49c00b8d5016ab2e0e94aec87d2bf5287c0b050b7f5",
       "content": {
         "type": "text",
         "text": "2"
@@ -60,7 +60,7 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "agent_message_chunk",
-      "messageId": "msg_0f752e492043360a016aaf090c9bd887d29412f798a2406289",
+      "messageId": "msg_06c339c49c00b8d5016ab2e0e94aec87d2bf5287c0b050b7f5",
       "content": {
         "type": "text",
         "text": "\n"
@@ -72,7 +72,7 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "agent_message_chunk",
-      "messageId": "msg_0f752e492043360a016aaf090c9bd887d29412f798a2406289",
+      "messageId": "msg_06c339c49c00b8d5016ab2e0e94aec87d2bf5287c0b050b7f5",
       "content": {
         "type": "text",
         "text": "3"
@@ -84,7 +84,7 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "agent_message_chunk",
-      "messageId": "msg_0f752e492043360a016aaf090c9bd887d29412f798a2406289",
+      "messageId": "msg_06c339c49c00b8d5016ab2e0e94aec87d2bf5287c0b050b7f5",
       "content": {
         "type": "text",
         "text": "\n"
@@ -96,7 +96,7 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "agent_message_chunk",
-      "messageId": "msg_0f752e492043360a016aaf090c9bd887d29412f798a2406289",
+      "messageId": "msg_06c339c49c00b8d5016ab2e0e94aec87d2bf5287c0b050b7f5",
       "content": {
         "type": "text",
         "text": "4"
@@ -108,7 +108,7 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "agent_message_chunk",
-      "messageId": "msg_0f752e492043360a016aaf090c9bd887d29412f798a2406289",
+      "messageId": "msg_06c339c49c00b8d5016ab2e0e94aec87d2bf5287c0b050b7f5",
       "content": {
         "type": "text",
         "text": "\n"
@@ -120,7 +120,7 @@
     "turnId": "turn-1",
     "update": {
       "sessionUpdate": "agent_message_chunk",
-      "messageId": "msg_0f752e492043360a016aaf090c9bd887d29412f798a2406289",
+      "messageId": "msg_06c339c49c00b8d5016ab2e0e94aec87d2bf5287c0b050b7f5",
       "content": {
         "type": "text",
         "text": "5"

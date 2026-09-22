@@ -4,8 +4,9 @@ import { describe, expect, it } from 'vitest';
 import { Ids } from '../../ids';
 import { allowOnce, recordingSink, type Answer } from '../../testing/eventSink';
 import { APPROVAL_PROMPT, TOOL_CALL_PROMPT } from '../../testing/prompts';
-import type { AgentEvent } from '../events';
+import { DEFAULT_MODE, type AgentEvent } from '../events';
 import { Executables } from '../findExecutable';
+import { ModeSettings } from '../modes';
 import { readTraffic, type TrafficLine } from '../traffic';
 import { ClaudeAdapter, ClaudeSdk } from './claudeAdapter';
 import { recordedSessionIds, replayQuery } from './claudeTraffic';
@@ -23,7 +24,8 @@ async function replay(name: string, prompt: string, answer: Answer = allowOnce):
   const services = Layer.mergeAll(
     Layer.succeed(ClaudeSdk, { query: replayQuery(traffic) }),
     Layer.succeed(Executables, { find: () => Effect.succeed(Option.some('/usr/local/bin/claude')) }),
-    Layer.succeed(Ids, { next: Effect.sync(() => ids.shift()!) })
+    Layer.succeed(Ids, { next: Effect.sync(() => ids.shift()!) }),
+    ModeSettings.none
   );
   await Effect.runPromise(
     Effect.gen(function* () {
@@ -31,6 +33,7 @@ async function replay(name: string, prompt: string, answer: Answer = allowOnce):
       adapter = yield* ClaudeAdapter.make({
         cwd: '/workspace',
         executablePath: Option.none(),
+        mode: DEFAULT_MODE,
         onEvent: recordingSink(events, answer, () => adapter),
       });
       yield* adapter.prompt([{ type: 'text', text: prompt }]);

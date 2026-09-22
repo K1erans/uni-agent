@@ -7,8 +7,9 @@ import { describe, expect, it } from 'vitest';
 import { Ids } from '../../ids';
 import { allowOnce, recordingSink, type Answer } from '../../testing/eventSink';
 import { APPROVAL_PROMPT, TOOL_CALL_PROMPT } from '../../testing/prompts';
-import type { AgentEvent } from '../events';
+import { DEFAULT_MODE, type AgentEvent } from '../events';
 import { Executables } from '../findExecutable';
+import { ModeSettings } from '../modes';
 import { readTraffic, TrafficRecorder, type WireMessage } from '../traffic';
 import { ClaudeAdapter, ClaudeSdk, type ClaudeQueryFn } from './claudeAdapter';
 import { recordedSessionIds, recordingQuery } from './claudeTraffic';
@@ -31,11 +32,12 @@ async function record(name: string, prompt: string, queryFn: ClaudeQueryFn = que
       adapter = yield* ClaudeAdapter.make({
         cwd,
         executablePath: Option.none(),
+        mode: DEFAULT_MODE,
         onEvent: recordingSink(events, answer, () => adapter),
       }).pipe(Effect.provide(Layer.succeed(ClaudeSdk, { query: recordingQuery(queryFn, recorder) })));
       yield* adapter.prompt([{ type: 'text', text: prompt }]);
       return adapter.sessionId;
-    }).pipe(Effect.scoped, Effect.provide(Layer.merge(Executables.live, Ids.live)))
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(Executables.live, Ids.live, ModeSettings.none)))
   );
 
   // Claude must adopt the session ID the adapter generated rather than assign its own.

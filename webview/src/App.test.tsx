@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import type { AgentEvent } from '../../src/agents/events';
+import type { AgentEvent, Mode } from '../../src/agents/events';
 import type { ExtensionMessage, ThreadInfo } from '../../src/protocol';
 import { App, type Drafts } from './App';
 import type { TurnItem } from './threadState';
@@ -15,8 +15,8 @@ function receive(message: ExtensionMessage) {
 const THREAD: ThreadInfo = { id: 'thread-1', agent: 'claude', workspace: 'uni-agent' };
 
 /** Shows a thread with these events, as the extension does when the webview reports ready. */
-function open(events: AgentEvent[] = [{ type: 'session_started', agent: 'claude', sessionId: 's1' }], thread = THREAD) {
-  receive({ type: 'history', thread, events: events.map((event) => ({ event, at: 0 })) });
+function open(events: AgentEvent[] = [{ type: 'session_started', agent: 'claude', sessionId: 's1' }], thread = THREAD, mode: Mode = 'auto_edit') {
+  receive({ type: 'history', thread, mode, events: events.map((event) => ({ event, at: 0 })) });
 }
 
 function event(agentEvent: AgentEvent, at = 0) {
@@ -33,6 +33,8 @@ const turnEnded = (turnId = 't1'): AgentEvent => ({ type: 'turn_ended', turnId, 
 
 const input = () => screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Message' });
 const sendButton = () => screen.getByRole<HTMLButtonElement>('button', { name: 'Send' });
+const modeSelect = () => screen.getByRole<HTMLSelectElement>('combobox', { name: 'Mode' });
+const modePicker = () => modeSelect().parentElement!;
 const type = (text: string) => fireEvent.change(input(), { target: { value: text } });
 
 describe('App', () => {
@@ -158,7 +160,7 @@ describe('App', () => {
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Retry prompt' }).disabled).toBe(true);
   });
 
-  it('shows the session settings the agent reports, disabled until they can be changed', () => {
+  it('shows the session settings the agent reports; all but the mode are disabled until they can be changed', () => {
     render(<App post={() => {}} />);
     open();
 
@@ -170,9 +172,46 @@ describe('App', () => {
     receive({ type: 'branch', name: 'main' });
 
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Model: claude-opus-5' }).disabled).toBe(true);
-    expect(screen.getByRole('button', { name: 'Permissions: Accept edits' })).toBeTruthy();
+    expect(modePicker().title).toContain('Claude Code runs it as Accept edits');
     expect(screen.getByRole('button', { name: 'Reasoning: Default' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Branch: main' })).toBeTruthy();
+  });
+
+  it('asks the extension to switch the shown thread’s mode, and shows the mode it reports', () => {
+    const post = vi.fn();
+    render(<App post={post} />);
+    expect(modeSelect().disabled).toBe(true);
+    open();
+    expect(modeSelect().value).toBe('auto_edit');
+    expect(modeSelect().disabled).toBe(false);
+
+    fireEvent.change(modeSelect(), { target: { value: 'plan' } });
+    expect(post).toHaveBeenLastCalledWith({ type: 'set_mode', threadId: 'thread-1', mode: 'plan' });
+    // Until the extension confirms the switch, the picker keeps showing the mode the thread runs in.
+    expect(modeSelect().value).toBe('auto_edit');
+
+    receive({ type: 'mode', threadId: 'thread-1', mode: 'plan' });
+    expect(modeSelect().value).toBe('plan');
+    expect(modePicker().textContent).toContain('Plan');
+  });
+
+  it('can change the mode while a turn is running', () => {
+    const post = vi.fn();
+    render(<App post={post} />);
+    open();
+    event(turnStarted('Count'));
+
+    fireEvent.change(modeSelect(), { target: { value: 'full_auto' } });
+    expect(post).toHaveBeenLastCalledWith({ type: 'set_mode', threadId: 'thread-1', mode: 'full_auto' });
+  });
+
+  it('shows each thread’s own mode', () => {
+    render(<App post={() => {}} />);
+    open(undefined, THREAD, 'full_auto');
+    expect(modeSelect().value).toBe('full_auto');
+
+    open([], { id: 'thread-2', agent: 'codex', workspace: null }, 'plan');
+    expect(modeSelect().value).toBe('plan');
   });
 
   it('replaces the conversation when the extension switches thread', () => {

@@ -1,6 +1,7 @@
 import { Effect, Exit, Layer, Option, Scope } from 'effect';
 import { describe, expect, it } from 'vitest';
 import { Branches } from './branches';
+import { FullAutoOptIn } from './fullAutoOptIn';
 import { Ids } from './ids';
 import type { ExtensionMessage } from './protocol';
 import { FakeAdapter } from './testing/fakeAdapter';
@@ -14,7 +15,8 @@ function webview() {
   return { messages, post, types: () => messages.map((message) => message.type) };
 }
 
-function setup() {
+/** @param optedIn Whether the workspace has already allowed Full auto. */
+function setup(optedIn = false) {
   const made: FakeAdapter[] = [];
   /** The folders whose branch is being watched right now. */
   const watching: string[] = [];
@@ -28,7 +30,8 @@ function setup() {
           yield* Effect.addFinalizer(() => Effect.sync(() => watching.splice(watching.indexOf(cwd), 1)));
           yield* onChange(Option.some('main'));
         }),
-    })
+    }),
+    Layer.succeed(FullAutoOptIn, { granted: Effect.succeed(optedIn), grant: Effect.void })
   );
   const scope = Effect.runSync(Scope.make());
   const threads = Effect.runSync(
@@ -186,6 +189,44 @@ describe('Threads', () => {
 
     expect(made[0].answers).toEqual([['permission-1', 'allow']]);
     expect(threads.list().some((thread) => thread.needsApproval)).toBe(false);
+  });
+
+  it('starts threads in Auto-edit and switches the named thread mid-thread, telling its webview', async () => {
+    const { threads, made, run } = setup();
+    const view = webview();
+    await run(threads.connect(view.post));
+    await run(threads.prompt('thread-1', 'Look around'));
+
+    await run(threads.setMode('thread-1', 'plan'));
+    await run(threads.setMode('thread-9', 'plan'));
+
+    expect(historyOf(view.messages)).toMatchObject({ mode: 'auto_edit' });
+    expect(made[0].modes).toEqual(['auto_edit', 'plan']);
+    expect(view.messages.at(-1)).toEqual({ type: 'mode', threadId: 'thread-1', mode: 'plan' });
+    // A webview that reconnects is told the thread's current mode.
+    const again = webview();
+    await run(threads.connect(again.post));
+    expect(historyOf(again.messages)).toMatchObject({ mode: 'plan' });
+  });
+
+  it('keeps a thread out of Full auto until the workspace has opted in', async () => {
+    const { threads, made, run } = setup();
+    const view = webview();
+    await run(threads.connect(view.post));
+
+    await run(threads.setMode('thread-1', 'full_auto'));
+
+    expect(made[0].modes).toEqual(['auto_edit']);
+    expect(view.types()).not.toContain('mode');
+  });
+
+  it('switches to Full auto once the workspace has opted in', async () => {
+    const { threads, made, run } = setup(true);
+    await run(threads.connect(webview().post));
+
+    await run(threads.setMode('thread-1', 'full_auto'));
+
+    expect(made[0].modes).toEqual(['auto_edit', 'full_auto']);
   });
 
   it('stops every thread when its scope closes', async () => {

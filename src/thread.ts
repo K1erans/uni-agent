@@ -1,5 +1,6 @@
 import { Clock, Effect, type Scope } from 'effect';
 import type { MakeAdapter } from './agents/adapter';
+import { DEFAULT_MODE, type Mode } from './agents/events';
 import { threadTitle, type ExtensionMessage, type ThreadEvent, type ThreadInfo } from './protocol';
 
 /** Where a thread's agent runs. */
@@ -27,6 +28,8 @@ export interface Thread {
   readonly isEmpty: boolean;
   /** Whether the agent is waiting for the user to answer a permission request. */
   readonly needsApproval: boolean;
+  /** How freely the agent may act; new threads start in {@link DEFAULT_MODE}. */
+  readonly mode: Mode;
   /** Connects a webview, replacing any previous one, and sends it the history so far. */
   attach(post: Post): Effect.Effect<void>;
   /** Stops forwarding events to the connected webview. */
@@ -35,6 +38,8 @@ export interface Thread {
   prompt(text: string): Effect.Effect<void>;
   /** Answers a permission request the agent is waiting on; an answer it cannot place is logged and dropped. */
   respond(requestId: string, optionId: string): Effect.Effect<void>;
+  /** Switches the thread's mode, including mid-turn, and tells the connected webview. Checking Full auto is allowed is the caller's job. */
+  setMode(mode: Mode): Effect.Effect<void>;
 }
 
 /**
@@ -70,6 +75,7 @@ export function makeThread<R>(
     let running = false;
     let prompted = false;
     let title: string | undefined;
+    let mode = DEFAULT_MODE;
 
     const adapter = yield* makeAdapter((event) =>
       Effect.flatMap(Clock.currentTimeMillis, (at) => {
@@ -81,7 +87,8 @@ export function makeThread<R>(
         }
         history.push({ event, at });
         return Effect.zipRight(post ? post({ type: 'event', threadId: id, event, at }) : Effect.void, onChanged());
-      })
+      }),
+      mode
     );
     // Finalizers run in reverse, so this runs before the adapter stops and its last events are not
     // posted to a closed webview.
@@ -100,10 +107,13 @@ export function makeThread<R>(
       get needsApproval() {
         return openApprovals(history).size > 0;
       },
+      get mode() {
+        return mode;
+      },
       attach: (next) =>
         Effect.suspend(() => {
           post = next;
-          return next({ type: 'history', thread: info, events: [...history] });
+          return next({ type: 'history', thread: info, mode, events: [...history] });
         }),
       detach: () => Effect.sync(() => (post = undefined)),
       prompt: (text) =>
@@ -128,6 +138,11 @@ export function makeThread<R>(
         Effect.catchTag(adapter.respond(requestId, optionId), 'UnknownPermissionRequest', (error) =>
           Effect.logDebug(`Ignored an answer for permission request ${error.requestId} of thread ${id}`)
         ),
+      setMode: (next) =>
+        Effect.suspend(() => {
+          mode = next;
+          return Effect.zipRight(adapter.setMode(next), post ? post({ type: 'mode', threadId: id, mode: next }) : Effect.void);
+        }),
     };
   });
 }

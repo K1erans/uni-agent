@@ -7,15 +7,17 @@ import { CodexAdapter } from './agents/codex/codexAdapter';
 import { CursorAdapter } from './agents/cursor/cursorAdapter';
 import { AGENT_NAMES, AgentKind } from './agents/events';
 import { Executables } from './agents/findExecutable';
+import type { ModeSettings } from './agents/modes';
 import { Stdio } from './agents/stdio';
 import type { UniAgentApi } from './api';
 import type { Branches } from './branches';
 import { disposable } from './disposable';
+import { FullAutoOptIn } from './fullAutoOptIn';
 import { gitBranchesLive } from './git';
 import { Ids } from './ids';
 import { outputChannelLogger } from './logger';
 import { MIN_VSCODE_VERSION, nodeSqliteAvailable } from './nodeSqlite';
-import { readSetting } from './settings';
+import { modeSettingsLive, readSetting } from './settings';
 import { registerSidebar, SIDEBAR_VIEW_ID } from './sidebar';
 import type { Thread, Workspace } from './thread';
 import { makeThreads, type Threads } from './threads';
@@ -36,16 +38,25 @@ const COMMANDS = [
 export function activate(context: vscode.ExtensionContext): UniAgentApi | undefined {
   const scope = Effect.runSync(Scope.make());
   context.subscriptions.push({ dispose: () => void Effect.runPromise(Scope.close(scope, Exit.void)) });
-  return Effect.runSync(start(context.extensionUri).pipe(Scope.extend(scope)));
+  return Effect.runSync(start(context).pipe(Scope.extend(scope)));
 }
 
-function start(extensionUri: vscode.Uri): Effect.Effect<UniAgentApi | undefined, never, Scope.Scope> {
+function start(context: vscode.ExtensionContext): Effect.Effect<UniAgentApi | undefined, never, Scope.Scope> {
   return Effect.gen(function* () {
     const channel = yield* disposable(() => vscode.window.createOutputChannel('Uni Agent', { log: true }));
     const runtime = yield* Layer.toRuntime(
-      Layer.mergeAll(outputChannelLogger(channel), ClaudeSdk.live, Stdio.live, Executables.live, Ids.live, gitBranchesLive)
+      Layer.mergeAll(
+        outputChannelLogger(channel),
+        ClaudeSdk.live,
+        Stdio.live,
+        Executables.live,
+        Ids.live,
+        gitBranchesLive,
+        modeSettingsLive,
+        FullAutoOptIn.live(context.workspaceState)
+      )
     );
-    return yield* startServices(extensionUri, channel).pipe(Effect.provide(runtime));
+    return yield* startServices(context.extensionUri, channel).pipe(Effect.provide(runtime));
   });
 }
 
@@ -97,7 +108,7 @@ function startServices(
   });
 }
 
-type Services = ClaudeSdk | Stdio | Executables | Ids | Branches;
+type Services = ClaudeSdk | Stdio | Executables | Ids | Branches | ModeSettings | FullAutoOptIn;
 
 const revealSidebar = Effect.promise(async () => vscode.commands.executeCommand(`${SIDEBAR_VIEW_ID}.focus`));
 
@@ -169,8 +180,8 @@ const ADAPTERS = {
 
 /** Each agent's CLI is found through its own machine-scoped `uniAgent.<agent>.executablePath` setting. */
 function makeAdapter(agent: AgentKind, workspace: Workspace): MakeAdapter<Services> {
-  return (onEvent) =>
-    ADAPTERS[agent]({ cwd: workspace.cwd, executablePath: readSetting(`${agent}.executablePath`, Schema.NonEmptyString), onEvent });
+  return (onEvent, mode) =>
+    ADAPTERS[agent]({ cwd: workspace.cwd, executablePath: readSetting(`${agent}.executablePath`, Schema.NonEmptyString), mode, onEvent });
 }
 
 export function deactivate(): void {

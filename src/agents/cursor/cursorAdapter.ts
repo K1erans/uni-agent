@@ -1,13 +1,15 @@
 import { Effect, Option, Schema, type Deferred, type Scope } from 'effect';
 import { Ids } from '../../ids';
 import { notSignedInMessage, type AdapterOptions } from '../adapter';
-import { ContentBlock, PermissionOption, StopReason, ToolCallStatus, ToolKind, type ToolCall, type ToolCallContent } from '../events';
+import { ContentBlock, MODE_NAMES, PermissionOption, StopReason, ToolCallStatus, ToolKind, type ToolCall, type ToolCallContent } from '../events';
 import { Executables } from '../findExecutable';
+import { ModeSettings } from '../modes';
 import { decodeMessage, type JsonRpcConnection, type MalformedMessage, type RpcError } from '../jsonRpc';
 import { AgentFailure, CLIENT_INFO, JsonRpcAdapter, type OpenedSession, type TurnError } from '../jsonRpcAdapter';
 import { Stdio } from '../stdio';
 import { WireMessage } from '../traffic';
 import { Turn, type ChunkKind } from '../turn';
+import { CursorModeOverrides, cursorModeId, cursorSessionMode } from './cursorModes';
 
 // The parts of the Agent Client Protocol (https://agentclientprotocol.com) the adapter reads.
 
@@ -27,8 +29,16 @@ const SessionOpened = Schema.Struct({
       availableModels: Schema.Array(Schema.Struct({ modelId: Schema.String, name: Schema.String })),
     })
   ),
-  modes: Schema.optional(Schema.Struct({ currentModeId: Schema.String })),
+  modes: Schema.optional(
+    Schema.Struct({ currentModeId: Schema.String, availableModes: Schema.optional(Schema.Array(Schema.Struct({ id: Schema.String }))) })
+  ),
 });
+
+/** The ACP session mode a session runs in, and the ones it offers. */
+interface SessionModes {
+  readonly current: string | undefined;
+  readonly available: Option.Option<ReadonlyArray<string>>;
+}
 
 const SessionCreated = Schema.Struct({ sessionId: Schema.String, ...SessionOpened.fields });
 
@@ -101,10 +111,12 @@ export class CursorAdapter extends JsonRpcAdapter<CursorTurn> {
   protected readonly args = ['acp'];
   /** Set while `session/load` replays the session's history, which the thread has already shown. */
   private loading = false;
+  /** The session's mode and the modes it offers; the offer is unknown if the agent did not report it. */
+  private sessionMode: SessionModes = { current: undefined, available: Option.none() };
 
-  static make(options: AdapterOptions): Effect.Effect<CursorAdapter, never, Stdio | Executables | Ids | Scope.Scope> {
+  static make(options: AdapterOptions): Effect.Effect<CursorAdapter, never, Stdio | Executables | Ids | ModeSettings | Scope.Scope> {
     return Effect.gen(function* () {
-      const adapter = new CursorAdapter(options, yield* Stdio, yield* Executables, yield* Ids, yield* Effect.scope);
+      const adapter = new CursorAdapter(options, yield* Stdio, yield* Executables, yield* Ids, yield* ModeSettings, yield* Effect.scope);
       yield* adapter.start();
       return adapter;
     });
@@ -130,17 +142,66 @@ export class CursorAdapter extends JsonRpcAdapter<CursorTurn> {
         const sessionId = resume.value;
         this.loading = true;
         const loaded = yield* rpc.request('session/load', { sessionId, ...session }, SessionOpened).pipe(Effect.ensuring(Effect.sync(() => (this.loading = false))));
-        return opened(sessionId, loaded);
+        return yield* this.inMode(rpc, sessionId, loaded);
       }
       const created = yield* rpc.request('session/new', session, SessionCreated);
-      return opened(created.sessionId, created);
+      return yield* this.inMode(rpc, created.sessionId, created);
     });
   }
 
   protected sendPrompt(rpc: JsonRpcConnection, sessionId: string, turn: CursorTurn, prompt: ReadonlyArray<ContentBlock>): Effect.Effect<void, TurnError> {
-    return Effect.flatMap(rpc.request('session/prompt', { sessionId, prompt }, PromptResult), ({ stopReason }) =>
-      this.endTurn(turn, turn.cancelRequested ? 'cancelled' : stopReason)
+    return this.switchMode(rpc, sessionId).pipe(
+      Effect.zipRight(rpc.request('session/prompt', { sessionId, prompt }, PromptResult)),
+      Effect.flatMap(({ stopReason }) => this.endTurn(turn, turn.cancelRequested ? 'cancelled' : stopReason))
     );
+  }
+
+  /** Switches the open session now; a failure is retried, and reported, with the next prompt. */
+  protected applyMode(): Effect.Effect<void> {
+    return this.withSession((rpc, sessionId) =>
+      this.switchMode(rpc, sessionId).pipe(Effect.catchAll((error) => Effect.logWarning('Could not switch the Cursor session mode', error)))
+    );
+  }
+
+  /** Records the modes a session opened with and switches it to the one wanted, reporting the mode it then runs in. */
+  private inMode(rpc: JsonRpcConnection, sessionId: string, session: typeof SessionOpened.Type): Effect.Effect<OpenedSession, TurnError> {
+    return Effect.gen(this, function* () {
+      const { modes } = session;
+      this.sessionMode = {
+        current: modes?.currentModeId,
+        available: Option.fromNullable(modes?.availableModes?.map((mode) => mode.id)),
+      };
+      yield* this.switchMode(rpc, sessionId);
+      return { ...opened(sessionId, session), permissionMode: this.sessionMode.current ?? 'default' };
+    });
+  }
+
+  /**
+   * Puts the session in the ACP mode the current mode maps to. If the agent does not offer it, the
+   * session runs in a more restrictive mode instead; if it offers none, the turn fails rather than
+   * run with more freedom than the user chose. An agent that does not say which modes it offers is
+   * asked for the wanted one, and fails the turn if it refuses.
+   */
+  private switchMode(rpc: JsonRpcConnection, sessionId: string): Effect.Effect<void, TurnError> {
+    return Effect.gen(this, function* () {
+      const wanted = yield* this.native(cursorModeId, CursorModeOverrides);
+      const { current, available } = this.sessionMode;
+      const modeId = Option.match(available, { onNone: () => Option.some(wanted), onSome: (offered) => cursorSessionMode(wanted, offered) });
+      if (Option.isNone(modeId)) {
+        return yield* new AgentFailure({
+          code: 'agent_error',
+          message: `Cursor offers no session mode that runs ${MODE_NAMES[this.mode]} (it has no "${wanted}" mode, nor a more restrictive one).`,
+        });
+      }
+      if (modeId.value === current) {
+        return;
+      }
+      if (modeId.value !== wanted) {
+        yield* Effect.logWarning(`Cursor has no "${wanted}" mode, so the session runs in the more restrictive "${modeId.value}" mode`);
+      }
+      yield* rpc.request('session/set_mode', { sessionId, modeId: modeId.value }, WireMessage);
+      this.sessionMode = { current: modeId.value, available };
+    });
   }
 
   protected interrupt(): Effect.Effect<void> {
@@ -202,10 +263,21 @@ export class CursorAdapter extends JsonRpcAdapter<CursorTurn> {
             return Effect.succeed(CANCELLED);
           }
           const call = toolCallOf(toolCall.title ?? 'Tool call', toolCall);
-          return Effect.zipRight(
+          const ask = Effect.zipRight(
             turn.toolCall({ ...call, status: 'pending' }),
             Effect.map(this.approvals.ask(turn.id, { ...call, status: 'pending' }, offered), (outcome): WireMessage => ({ outcome: { ...outcome } }))
           );
+          if (this.mode !== 'full_auto') {
+            return ask;
+          }
+          // Full auto asks for nothing: Cursor has no mode that stops asking, so its asks are allowed
+          // here, once. Always-allow would leave a rule behind that outlives the thread, so a request
+          // without allow-once goes to the user instead.
+          const allow = offered.find((option) => option.kind === 'allow_once');
+          if (!allow) {
+            return Effect.zipRight(Effect.logWarning(`Cursor offered no allow-once option for "${call.title}", so Full auto asks the user`), ask);
+          }
+          return Effect.as(turn.toolCall({ ...call, status: 'in_progress' }), { outcome: { outcome: 'selected', optionId: allow.optionId } });
         })
       )
     );

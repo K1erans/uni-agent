@@ -33,6 +33,7 @@ describe('Thread', () => {
     expect(second).toHaveBeenCalledWith({
       type: 'history',
       thread: { id: 'thread-1', agent: 'claude', workspace: 'uni-agent' },
+      mode: 'auto_edit',
       events: [
         { event: expect.objectContaining({ type: 'session_started' }), at: expect.any(Number) },
         { event: expect.objectContaining({ type: 'turn_started' }), at: expect.any(Number) },
@@ -106,6 +107,19 @@ describe('Thread', () => {
 
     await Effect.runPromise(thread.respond('permission-1', 'allow'));
     expect(adapter.answers).toEqual([['permission-1', 'allow']]);
+  });
+
+  it('switches its adapter to a new mode mid-turn, and tells the connected webview', async () => {
+    const { thread, adapter, attach, prompt } = setup();
+    const post = vi.fn();
+    attach(post);
+    await prompt('hi');
+
+    await Effect.runPromise(thread.setMode('plan'));
+
+    expect(thread.mode).toBe('plan');
+    expect(adapter.modes).toEqual(['auto_edit', 'plan']);
+    expect(post).toHaveBeenLastCalledWith({ type: 'mode', threadId: 'thread-1', mode: 'plan' });
   });
 
   it('stops the adapter when its scope closes', async () => {

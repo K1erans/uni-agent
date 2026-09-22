@@ -1,5 +1,6 @@
 import { Option, Schema } from 'effect';
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import type { Mode } from '../../src/agents/events';
 import { ExtensionMessage, type WebviewMessage } from '../../src/protocol';
 import { Composer } from './Composer';
 import { AGENT_NAMES } from './labels';
@@ -74,6 +75,16 @@ export function App({ post, drafts }: AppProps) {
     [post]
   );
 
+  const setMode = useCallback(
+    (mode: Mode) => {
+      const { thread } = latest.current;
+      if (thread) {
+        post({ type: 'set_mode', threadId: thread.id, mode });
+      }
+    },
+    [post]
+  );
+
   const agentName = state.thread ? AGENT_NAMES[state.thread.agent] : 'the agent';
   return (
     <main className="sidebar">
@@ -88,6 +99,8 @@ export function App({ post, drafts }: AppProps) {
         }}
         canSend={state.thread !== undefined && !state.running && draft.trim() !== ''}
         agentName={agentName}
+        mode={state.mode}
+        onModeChange={state.thread ? setMode : undefined}
         config={state.config}
         workspace={state.thread?.workspace ?? null}
         branch={state.branch}

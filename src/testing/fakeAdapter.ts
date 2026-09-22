@@ -1,27 +1,32 @@
 import { Effect } from 'effect';
 import type { AgentAdapter, EventSink, MakeAdapter } from '../agents/adapter';
 import { UnknownPermissionRequest } from '../agents/adapter';
-import type { AgentKind, ContentBlock, StopReason } from '../agents/events';
+import type { AgentKind, ContentBlock, Mode, StopReason } from '../agents/events';
 
 /** An adapter for tests whose turns run until the test ends them. */
 export class FakeAdapter implements AgentAdapter {
   readonly prompts: ReadonlyArray<ContentBlock>[] = [];
   /** The answers the thread routed to this adapter, as request and option IDs. */
   readonly answers: [string, string][] = [];
+  /** The mode the adapter was built with, then each one the thread switched it to. */
+  readonly modes: Mode[];
   disposed = false;
   private readonly requests = new Set<string>();
 
   constructor(
     readonly agent: AgentKind,
     readonly sessionId: string,
-    private readonly onEvent: EventSink
-  ) {}
+    private readonly onEvent: EventSink,
+    mode: Mode
+  ) {
+    this.modes = [mode];
+  }
 
   /** Builds fake adapters for `agent`, recording each one in `made`, announcing sessions like Claude's adapter does. */
   static maker(made: FakeAdapter[], agent: AgentKind = 'claude'): MakeAdapter<never> {
-    return (onEvent) =>
+    return (onEvent, mode) =>
       Effect.gen(function* () {
-        const fake = new FakeAdapter(agent, `session-${made.length + 1}`, onEvent);
+        const fake = new FakeAdapter(agent, `session-${made.length + 1}`, onEvent, mode);
         yield* onEvent({ type: 'session_started', agent, sessionId: fake.sessionId });
         yield* Effect.addFinalizer(() => Effect.sync(() => (fake.disposed = true)));
         made.push(fake);
@@ -53,6 +58,10 @@ export class FakeAdapter implements AgentAdapter {
       this.answers.push([requestId, optionId]);
       return this.onEvent({ type: 'permission_resolved', turnId: this.turnId, requestId, outcome: { outcome: 'selected', optionId } });
     });
+  }
+
+  setMode(mode: Mode): Effect.Effect<void> {
+    return Effect.sync(() => void this.modes.push(mode));
   }
 
   /** Announces a permission request the test can then answer. */
