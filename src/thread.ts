@@ -1,6 +1,6 @@
-import { Clock, Effect, type Scope } from 'effect';
-import type { MakeAdapter } from './agents/adapter';
-import { AGENT_NAMES, DEFAULT_MODE, MODE_NAMES, type Mode } from './agents/events';
+import { Clock, Data, Effect, Fiber, type Scope } from 'effect';
+import type { EventSink, MakeAdapter } from './agents/adapter';
+import { AGENT_NAMES, DEFAULT_MODE, MODE_NAMES, type AgentEvent, type AgentKind, type Mode, type StopReason } from './agents/events';
 import { threadTitle, type ExtensionMessage, type ThreadEvent, type ThreadInfo } from './protocol';
 
 /** Where a thread's agent runs. */
@@ -12,6 +12,21 @@ export interface Workspace {
 
 /** Delivers a message to the connected webview. */
 export type Post = (message: ExtensionMessage) => Effect.Effect<void>;
+
+export class PromptRejected extends Data.TaggedError('PromptRejected')<{ readonly reason: 'busy' | 'empty' }> {}
+
+export interface TurnResult {
+  readonly agent: AgentKind;
+  readonly model: string | undefined;
+  readonly sessionId: string | undefined;
+  readonly stopReason: StopReason;
+  readonly response: string;
+  readonly events: ReadonlyArray<AgentEvent>;
+}
+
+export type PromptAdmission =
+  | { readonly status: 'accepted'; readonly completion: Effect.Effect<TurnResult> }
+  | { readonly status: 'rejected'; readonly reason: 'busy' | 'empty' };
 
 /**
  * One conversation with one agent. Keeps every event the adapter emits, stamped with when it
@@ -34,8 +49,12 @@ export interface Thread {
   attach(post: Post): Effect.Effect<void>;
   /** Stops forwarding events to the connected webview. */
   detach(): Effect.Effect<void>;
-  /** Starts a turn; blank prompts and prompts sent while a turn runs are ignored. */
-  prompt(text: string): Effect.Effect<void>;
+  /** Reserves a turn immediately and reports whether the prompt was admitted. */
+  prompt(text: string): Effect.Effect<PromptAdmission>;
+  /** Reserves a turn and waits for its reviewable result. */
+  run(text: string): Effect.Effect<TurnResult, PromptRejected>;
+  /** Stops the running turn. */
+  cancel(): Effect.Effect<void>;
   /** Answers a permission request the agent is waiting on; an answer it cannot place is logged and dropped. */
   respond(requestId: string, optionId: string): Effect.Effect<void>;
   /**
@@ -69,7 +88,10 @@ export function makeThread<R>(
   id: string,
   workspace: Workspace,
   makeAdapter: MakeAdapter<R>,
-  onChanged: () => Effect.Effect<void> = () => Effect.void
+  onChanged: () => Effect.Effect<void> = () => Effect.void,
+  onEvent: EventSink = () => Effect.void,
+  model?: string,
+  initialMode: Mode = DEFAULT_MODE
 ): Effect.Effect<Thread, never, R | Scope.Scope> {
   return Effect.gen(function* () {
     const scope = yield* Effect.scope;
@@ -78,29 +100,55 @@ export function makeThread<R>(
     let running = false;
     let prompted = false;
     let title: string | undefined;
-    let mode = DEFAULT_MODE;
+    let mode = initialMode;
+    let sessionId: string | undefined;
+    let configuredModel: string | undefined;
     // Mode changes arrive on fibers of their own; one at a time keeps the mode shown in step with
     // the one the agent runs in.
     const modeLock = yield* Effect.makeSemaphore(1);
 
     const adapter = yield* makeAdapter((event) =>
       Effect.flatMap(Clock.currentTimeMillis, (at) => {
-        if (event.type === 'turn_started' || event.type === 'turn_ended') {
-          running = event.type === 'turn_started';
+        if (event.type === 'session_started') {
+          sessionId = event.sessionId;
+        } else if (event.type === 'session_configured') {
+          configuredModel = event.model;
         }
         if (event.type === 'turn_started' && title === undefined) {
           title = threadTitle(event.prompt.map((block) => block.text).join('\n'));
         }
         history.push({ event, at });
-        return Effect.zipRight(post ? post({ type: 'event', threadId: id, event, at }) : Effect.void, onChanged());
+        return Effect.zipRight(Effect.zipRight(post ? post({ type: 'event', threadId: id, event, at }) : Effect.void, onChanged()), onEvent(event));
       }),
-      mode
+      mode,
+      model
     );
     // Finalizers run in reverse, so this runs before the adapter stops and its last events are not
     // posted to a closed webview.
     yield* Effect.addFinalizer(() => Effect.sync(() => (post = undefined)));
 
     const info: ThreadInfo = { id, agent: adapter.agent, workspace: workspace.name };
+    const prompt = (text: string): Effect.Effect<PromptAdmission> =>
+      Effect.suspend(() => {
+        if (!text.trim()) {
+          return Effect.succeed({ status: 'rejected' as const, reason: 'empty' as const });
+        }
+        if (running) {
+          return Effect.succeed({ status: 'rejected' as const, reason: 'busy' as const });
+        }
+        running = true;
+        prompted = true;
+        const from = history.length;
+        const turn = adapter.prompt([{ type: 'text', text }]).pipe(
+          Effect.orDie,
+          Effect.map((stopReason): TurnResult => {
+            const events = history.slice(from).map(({ event }) => event);
+            return { agent: adapter.agent, model: configuredModel, sessionId, stopReason, response: replyText(events), events };
+          }),
+          Effect.ensuring(Effect.sync(() => { running = false; }))
+        );
+        return Effect.map(Effect.forkIn(turn, scope), (fiber): PromptAdmission => ({ status: 'accepted', completion: Fiber.join(fiber) }));
+      });
     return {
       info,
       workspace,
@@ -122,22 +170,11 @@ export function makeThread<R>(
           return next({ type: 'history', thread: info, mode, events: [...history] });
         }),
       detach: () => Effect.sync(() => (post = undefined)),
-      prompt: (text) =>
-        Effect.suspend(() => {
-          if (!text.trim() || running) {
-            return Effect.void;
-          }
-          // The turn runs on its own fiber, which starts after this returns, so mark it running now
-          // rather than on `turn_started`; a prompt arriving meanwhile is then ignored too.
-          running = true;
-          prompted = true;
-          return adapter.prompt([{ type: 'text', text }]).pipe(
-            // The running check above means the adapter never sees a second prompt mid-turn.
-            Effect.orDie,
-            Effect.forkIn(scope),
-            Effect.asVoid
-          );
-        }),
+      prompt,
+      run: (text) => Effect.flatMap(prompt(text), (admission) =>
+        admission.status === 'accepted' ? admission.completion : new PromptRejected({ reason: admission.reason })
+      ),
+      cancel: () => adapter.cancel(),
       respond: (requestId, optionId) =>
         // An answer for a request that is no longer open (the turn ended, or a second click) is
         // nothing to act on, and never a reason to break the thread.
@@ -162,4 +199,16 @@ export function makeThread<R>(
         ),
     };
   });
+}
+
+/** Groups streamed chunks by native message ID, preserving their first-seen order. */
+function replyText(events: ReadonlyArray<AgentEvent>): string {
+  const messages = new Map<string, string>();
+  for (const event of events) {
+    if (event.type === 'session_update' && event.update.sessionUpdate === 'agent_message_chunk') {
+      const { messageId, content } = event.update;
+      messages.set(messageId, (messages.get(messageId) ?? '') + content.text);
+    }
+  }
+  return [...messages.values()].join('\n');
 }

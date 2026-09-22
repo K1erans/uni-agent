@@ -38,7 +38,9 @@ export function registerSidebar(
             case 'ready':
               return Effect.andThen(threads.connect(post), () => onReady(view));
             case 'prompt':
-              return threads.prompt(message.threadId, message.text);
+              return Effect.flatMap(threads.submitSidebar(post, message.threadId, message.text), (outcome) =>
+                post({ type: 'prompt_result', threadId: message.threadId, submissionId: message.submissionId, ...outcome })
+              );
             case 'permission_response':
               return threads.respond(message.threadId, message.requestId, message.optionId);
             case 'set_mode':

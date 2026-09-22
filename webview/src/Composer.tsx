@@ -7,6 +7,7 @@ import type { SessionConfig } from './threadState';
 
 interface ComposerProps {
   draft: string;
+  rejection?: string;
   onDraftChange: (draft: string) => void;
   /** Sends the draft; the composer only calls it when `canSend`. */
   onSend: () => void;
@@ -25,7 +26,7 @@ interface ComposerProps {
  * what the agent really runs with; only the mode can be changed from here so far, and the others
  * are disabled.
  */
-export function Composer({ draft, onDraftChange, onSend, canSend, agentName, mode, onModeChange, config, workspace, branch }: ComposerProps) {
+export function Composer({ draft, rejection, onDraftChange, onSend, canSend, agentName, mode, onModeChange, config, workspace, branch }: ComposerProps) {
   const input = useRef<HTMLTextAreaElement>(null);
   const send = () => {
     if (canSend) {
@@ -78,8 +79,8 @@ export function Composer({ draft, onDraftChange, onSend, canSend, agentName, mod
           {branch !== null && <SettingControl name="Branch" value={branch} icon={<BranchIcon size={12} />} />}
         </div>
       </div>
-      <p id="composer-hint" className="composer-hint">
-        Enter to send · Shift + Enter for a new line
+      <p id="composer-hint" className={rejection ? 'composer-hint composer-rejection' : 'composer-hint'} role={rejection ? 'alert' : undefined}>
+        {rejection ?? 'Enter to send · Shift + Enter for a new line'}
       </p>
     </form>
   );

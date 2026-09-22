@@ -48,7 +48,7 @@ describe('backend task', () => {
       return yield* task.run('Implement search');
     }).pipe(Effect.scoped, Effect.provide(services)));
 
-    expect(output.delegation).toMatchObject({
+    expect(output.turn).toMatchObject({
       agent: 'codex', model: 'gpt-6-sol', sessionId: 'thread-1', stopReason: 'end_turn', response: 'Done.',
     });
     expect(output.worktree).toBeUndefined();

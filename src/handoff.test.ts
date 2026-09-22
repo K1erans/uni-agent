@@ -1,22 +1,18 @@
 import { Effect, Either } from 'effect';
 import { describe, expect, it } from 'vitest';
-import type { Delegation, DelegationResult } from './delegation';
-import { handoffBriefPrompt, runHandoff } from './handoff';
+import { handoffBriefPrompt, runHandoff, type HandoffAgent } from './handoff';
+import type { TurnResult } from './thread';
 
-function delegation(result: DelegationResult, prompts: string[]): Delegation {
+function delegation(result: TurnResult, prompts: string[]): HandoffAgent {
   return {
-    agent: result.agent,
     run: (prompt) => Effect.sync(() => {
       prompts.push(prompt);
       return result;
     }),
-    cancel: () => Effect.void,
-    respond: () => Effect.void,
-    setMode: () => Effect.void,
   };
 }
 
-const planningResult: DelegationResult = {
+const planningResult: TurnResult = {
   agent: 'codex', model: 'Sol', sessionId: 'plan-session', stopReason: 'end_turn',
   response: 'Goal: implement search.\nAcceptance: tests pass.', events: [],
 };

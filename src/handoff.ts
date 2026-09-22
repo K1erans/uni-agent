@@ -1,12 +1,16 @@
 import { Data, Effect } from 'effect';
-import type { Delegation, DelegationResult } from './delegation';
+import type { PromptRejected, TurnResult } from './thread';
+
+export interface HandoffAgent {
+  run(prompt: string): Effect.Effect<TurnResult, PromptRejected>;
+}
 
 export class HandoffFailed extends Data.TaggedError('HandoffFailed')<{ readonly reason: string }> {}
 
 export interface HandoffResult {
   readonly brief: string;
-  readonly planning: DelegationResult;
-  readonly implementation: DelegationResult;
+  readonly planning: TurnResult;
+  readonly implementation: TurnResult;
 }
 
 /** The planning agent has the context; ask it for a brief another agent can act on. */
@@ -30,8 +34,8 @@ export function handoffBriefPrompt(originalRequest: string, contextPaths: Readon
  * complete brief; an error or cancelled planning turn cannot create or prompt the target.
  */
 export function runHandoff<E, R>(
-  planning: Delegation,
-  createTarget: (brief: string) => Effect.Effect<Delegation, E, R>,
+  planning: HandoffAgent,
+  createTarget: (brief: string) => Effect.Effect<HandoffAgent, E, R>,
   originalRequest: string,
   contextPaths: ReadonlyArray<string>,
   briefPrompt = handoffBriefPrompt(originalRequest, contextPaths)

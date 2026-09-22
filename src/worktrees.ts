@@ -1,12 +1,13 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { Context, Data, Effect, Layer } from 'effect';
 
 const exec = promisify(execFile);
 
 export class GitFailed extends Data.TaggedError('GitFailed')<{ readonly operation: string; readonly reason: string }> {}
+export class WorktreeSetupFailed extends Data.TaggedError('WorktreeSetupFailed')<{ readonly reason: string }> {}
 
 export interface Git {
   run(cwd: string, args: ReadonlyArray<string>): Effect.Effect<string, GitFailed>;
@@ -25,6 +26,7 @@ export interface Worktree {
   readonly path: string;
   readonly branch: string;
   readonly base: string;
+  readonly repo: string;
 }
 
 /** Creates an isolated checkout on a new branch; the caller owns its eventual removal. */
@@ -50,7 +52,63 @@ export function createWorktree(repoPath: string, storagePath: string, slug: stri
     });
     const branch = `uni/${slug}`;
     yield* git.run(root, ['worktree', 'add', '-b', branch, target, base]);
-    return { path: target, branch, base };
+    return { path: target, branch, base, repo: root };
+  });
+}
+
+/** Creates a checkout and runs its setup before a thread may use it. Failed setup removes the checkout. */
+export function prepareWorktree(
+  repoPath: string,
+  storagePath: string,
+  slug: string,
+  setupCommand?: string
+): Effect.Effect<Worktree, GitFailed | WorktreeSetupFailed, GitRunner> {
+  return Effect.gen(function* () {
+    const worktree = yield* createWorktree(repoPath, storagePath, slug);
+    if (setupCommand?.trim()) {
+      yield* runSetup(worktree.path, setupCommand).pipe(
+        Effect.onError(() => removeWorktree(worktree, true).pipe(Effect.catchAll((error) => Effect.logWarning('Could not remove a failed worktree setup', error))))
+      );
+    }
+    return worktree;
+  });
+}
+
+/** Removes the checkout; branch removal is a separate, explicit discard choice. */
+export function removeWorktree(worktree: Worktree, discardBranch: boolean): Effect.Effect<void, GitFailed, GitRunner> {
+  return Effect.gen(function* () {
+    const git = yield* GitRunner;
+    yield* git.run(worktree.repo, ['worktree', 'remove', '--force', worktree.path]);
+    if (discardBranch) {
+      yield* git.run(worktree.repo, ['branch', '-D', worktree.branch]);
+    }
+  });
+}
+
+/** Runs the configured command in the checkout; interruption stops its shell process. */
+function runSetup(cwd: string, command: string): Effect.Effect<void, WorktreeSetupFailed> {
+  return Effect.async<void, WorktreeSetupFailed>((resume) => {
+    // A shell can launch long-running setup children. On POSIX, give it a process group so
+    // interrupting setup stops those children before the checkout is removed.
+    const grouped = process.platform !== 'win32';
+    const child = spawn(command, { cwd, shell: true, detached: grouped, stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr?.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-4000); });
+    child.once('error', (error) => resume(Effect.fail(new WorktreeSetupFailed({ reason: error.message }))));
+    child.once('exit', (code, signal) => resume(code === 0
+      ? Effect.void
+      : Effect.fail(new WorktreeSetupFailed({ reason: stderr.trim() || `Setup exited with ${signal ?? code}.` }))));
+    return Effect.sync(() => {
+      if (grouped && child.pid) {
+        try {
+          process.kill(-child.pid, 'SIGTERM');
+        } catch {
+          child.kill('SIGTERM');
+        }
+      } else {
+        child.kill('SIGTERM');
+      }
+    });
   });
 }
 

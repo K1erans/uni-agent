@@ -1,4 +1,4 @@
-import { Effect } from 'effect';
+import { Deferred, Effect } from 'effect';
 import type { AgentAdapter, EventSink, MakeAdapter } from '../agents/adapter';
 import { ModeChangeFailed, UnknownPermissionRequest } from '../agents/adapter';
 import type { AgentKind, ContentBlock, Mode, StopReason } from '../agents/events';
@@ -14,6 +14,7 @@ export class FakeAdapter implements AgentAdapter {
   refusesModes = false;
   disposed = false;
   private readonly requests = new Set<string>();
+  private pending: Deferred.Deferred<StopReason> | undefined;
 
   constructor(
     readonly agent: AgentKind,
@@ -37,13 +38,12 @@ export class FakeAdapter implements AgentAdapter {
   }
 
   prompt(prompt: ReadonlyArray<ContentBlock>): Effect.Effect<StopReason> {
-    return Effect.andThen(
-      Effect.suspend(() => {
+    return Effect.gen(this, function* () {
+      this.pending = yield* Deferred.make<StopReason>();
         this.prompts.push(prompt);
-        return this.onEvent({ type: 'turn_started', turnId: `turn-${this.prompts.length}`, prompt });
-      }),
-      Effect.never
-    );
+      yield* this.onEvent({ type: 'turn_started', turnId: `turn-${this.prompts.length}`, prompt });
+      return yield* Deferred.await(this.pending);
+    });
   }
 
   cancel(): Effect.Effect<void> {
@@ -86,7 +86,20 @@ export class FakeAdapter implements AgentAdapter {
     return `turn-${this.prompts.length}`;
   }
 
+  say(text: string): Promise<void> {
+    return Effect.runPromise(this.onEvent({
+      type: 'session_update', turnId: this.turnId,
+      update: { sessionUpdate: 'agent_message_chunk', messageId: `${this.turnId}:message`, content: { type: 'text', text } },
+    }));
+  }
+
   endTurn(): Promise<void> {
-    return Effect.runPromise(this.onEvent({ type: 'turn_ended', turnId: this.turnId, stopReason: 'end_turn' }));
+    return Effect.runPromise(Effect.gen(this, function* () {
+      yield* this.onEvent({ type: 'turn_ended', turnId: this.turnId, stopReason: 'end_turn' });
+      if (this.pending) {
+        yield* Deferred.succeed(this.pending, 'end_turn');
+      }
+      yield* Effect.yieldNow();
+    }));
   }
 }

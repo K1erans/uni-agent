@@ -1,3 +1,7 @@
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { Effect, Exit, Layer, Option, Scope } from 'effect';
 import { describe, expect, it } from 'vitest';
 import { Branches } from './branches';
@@ -7,6 +11,7 @@ import type { ExtensionMessage } from './protocol';
 import { FakeAdapter } from './testing/fakeAdapter';
 import type { Post } from './thread';
 import { makeThreads } from './threads';
+import { GitRunner } from './worktrees';
 
 /** A webview double recording what it is sent. */
 function webview() {
@@ -16,7 +21,7 @@ function webview() {
 }
 
 /** @param optedIn Whether the workspace has already allowed Full auto. */
-function setup(optedIn = false) {
+function setup(optedIn = false, worktree?: { readonly repo: string; readonly storage: string }) {
   const made: FakeAdapter[] = [];
   /** The folders whose branch is being watched right now. */
   const watching: string[] = [];
@@ -31,13 +36,16 @@ function setup(optedIn = false) {
           yield* onChange(Option.some('main'));
         }),
     }),
-    Layer.succeed(FullAutoOptIn, { granted: Effect.succeed(optedIn), grant: Effect.void })
+    Layer.succeed(FullAutoOptIn, { granted: Effect.succeed(optedIn), grant: Effect.void }),
+    GitRunner.live
   );
   const scope = Effect.runSync(Scope.make());
   const threads = Effect.runSync(
     makeThreads(
-      () => ({ cwd: '/work/uni-agent', name: 'uni-agent' }),
-      (agent) => FakeAdapter.maker(made, agent)
+      () => ({ cwd: worktree?.repo ?? '/work/uni-agent', name: 'uni-agent' }),
+      (agent) => FakeAdapter.maker(made, agent),
+      () => Effect.void,
+      worktree ? { storagePath: worktree.storage, setupCommand: () => 'echo ready > setup.txt' } : undefined
     ).pipe(Scope.extend(scope), Effect.provide(services))
   );
   return {
@@ -45,7 +53,7 @@ function setup(optedIn = false) {
     made,
     watching,
     /** Runs an effect and lets any turn it forks start. */
-    run: <A>(effect: Effect.Effect<A>) => Effect.runPromise(Effect.tap(effect, () => Effect.yieldNow())),
+    run: <A, E>(effect: Effect.Effect<A, E>) => Effect.runPromise(Effect.tap(effect, () => Effect.yieldNow())),
     close: () => Effect.runPromise(Scope.close(scope, Exit.void)),
   };
 }
@@ -53,6 +61,31 @@ function setup(optedIn = false) {
 const historyOf = (messages: ExtensionMessage[]) => messages.filter((message) => message.type === 'history').at(-1);
 
 describe('Threads', () => {
+  it('creates, reviews, and discards a VS Code worktree thread', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'uni-agent-threads-test-'));
+    const repo = path.join(root, 'repo');
+    await fs.mkdir(repo);
+    execFileSync('git', ['init', '-q', repo]);
+    await fs.writeFile(path.join(repo, 'file.txt'), 'before\n');
+    execFileSync('git', ['add', 'file.txt'], { cwd: repo });
+    execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'initial'], { cwd: repo });
+    const { threads, run, close } = setup(false, { repo, storage: path.join(root, 'storage') });
+    try {
+      await run(threads.connect(webview().post));
+      const isolated = await run(threads.createInWorktree('cursor'));
+      expect(isolated.workspace.cwd).toContain('thread-2');
+      expect(await fs.readFile(path.join(isolated.workspace.cwd, 'setup.txt'), 'utf8')).toContain('ready');
+      const review = await run(threads.reviewCurrentWorktree());
+      expect(review?.diffStat).toContain('setup.txt');
+      expect(await run(threads.removeCurrentWorktree(true))).toBe(true);
+      expect(threads.current?.info.id).toBe('thread-1');
+      expect(execFileSync('git', ['branch', '--list', 'uni/thread-2'], { cwd: repo }).toString().trim()).toBe('');
+    } finally {
+      await close();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('creates a thread for the first webview and sends it the thread, then its branch', async () => {
     const { threads, run, watching } = setup();
     const view = webview();
@@ -174,6 +207,18 @@ describe('Threads', () => {
 
     expect(made[0].prompts.map(([block]) => block.text)).toEqual(['For the first thread', 'Second turn']);
     expect(made[1].prompts).toEqual([]);
+  });
+
+  it('rejects stale sidebar submissions while allowing intentional background prompts', async () => {
+    const { threads, made, run } = setup();
+    const view = webview();
+    await run(threads.connect(view.post));
+    await run(threads.create('codex'));
+
+    expect(await run(threads.submitSidebar(view.post, 'thread-1', 'stale'))).toEqual({ status: 'rejected', reason: 'stale' });
+    expect(made[0].prompts).toHaveLength(0);
+    expect(await run(threads.prompt('thread-1', 'intentional background'))).toEqual({ status: 'accepted' });
+    expect(made[0].prompts[0][0].text).toBe('intentional background');
   });
 
   it('answers permission requests in the thread they name, whether or not it is shown', async () => {

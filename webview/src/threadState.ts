@@ -100,11 +100,9 @@ export const emptyThread: ThreadState = {
 
 /**
  * What changes the thread: a message from the extension, or the composer having posted a prompt.
- * The extension ignores prompts while a turn runs, and it counts the turn as running from the moment
- * it accepts the prompt, before `turn_started` arrives. So the webview stops sending from the moment
- * it posts; `turn_started` and then `turn_ended` always follow an accepted prompt.
+ * The webview blocks a second send while it waits for the extension's admission result.
  */
-export type ThreadAction = ExtensionMessage | { type: 'prompt_sent' };
+export type ThreadAction = ExtensionMessage | { type: 'prompt_sent' } | { type: 'prompt_rejected' };
 
 export function threadReducer(state: ThreadState, action: ThreadAction): ThreadState {
   switch (action.type) {
@@ -119,6 +117,10 @@ export function threadReducer(state: ThreadState, action: ThreadAction): ThreadS
       return { ...state, branch: action.name };
     case 'prompt_sent':
       return { ...state, running: true };
+    case 'prompt_rejected':
+      return { ...state, running: false };
+    case 'prompt_result':
+      return state;
   }
 }
 

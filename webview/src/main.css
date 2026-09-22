@@ -43,6 +43,8 @@
   --ua-font: var(--vscode-font-family, Inter, system-ui, sans-serif);
 }
 
+.composer-rejection { color: var(--ua-problem); }
+
 body.vscode-dark {
   --ua-bg: #232530;
   --ua-divider: #30333f;

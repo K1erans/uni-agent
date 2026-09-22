@@ -1,5 +1,6 @@
 import * as os from 'node:os';
-import { Effect, Exit, Layer, Runtime, Schema, Scope } from 'effect';
+import * as path from 'node:path';
+import { Effect, Exit, Layer, Option, Runtime, Schema, Scope } from 'effect';
 import * as vscode from 'vscode';
 import type { MakeAdapter } from './agents/adapter';
 import { ClaudeSdk } from './agents/claude/claudeAdapter';
@@ -20,10 +21,15 @@ import { modeSettingsLive, readSetting } from './settings';
 import { registerSidebar, SIDEBAR_VIEW_ID } from './sidebar';
 import type { Thread, Workspace } from './thread';
 import { makeThreads, type Threads } from './threads';
+import { GitRunner, type GitFailed, type WorktreeSetupFailed } from './worktrees';
 
 const COMMANDS = [
   'uniAgent.newThread',
   'uniAgent.newThreadWithAgent',
+  'uniAgent.newWorktreeThread',
+  'uniAgent.reviewWorktree',
+  'uniAgent.openWorktree',
+  'uniAgent.removeWorktree',
   'uniAgent.showThreadHistory',
   'uniAgent.showLogs',
   'uniAgent.openSettings',
@@ -51,16 +57,18 @@ function start(context: vscode.ExtensionContext): Effect.Effect<UniAgentApi | un
         Executables.live,
         Ids.live,
         gitBranchesLive,
+        GitRunner.live,
         modeSettingsLive,
         FullAutoOptIn.live(context.workspaceState)
       )
     );
-    return yield* startServices(context.extensionUri, channel).pipe(Effect.provide(runtime));
+    return yield* startServices(context.extensionUri, context.globalStorageUri.fsPath, channel).pipe(Effect.provide(runtime));
   });
 }
 
 function startServices(
   extensionUri: vscode.Uri,
+  storagePath: string,
   channel: vscode.LogOutputChannel
 ): Effect.Effect<UniAgentApi | undefined, never, Services | Scope.Scope> {
   return Effect.gen(function* () {
@@ -84,7 +92,10 @@ function startServices(
     let sidebar: vscode.WebviewView | undefined;
     // VS Code disposes the view whenever the sidebar is hidden, and a disposed one refuses a badge.
     const showWaiting = (): Effect.Effect<void> => Effect.ignore(Effect.try(() => badgeWaiting(sidebar, threads)));
-    const threads: Threads = yield* makeThreads(currentWorkspace, makeAdapter, showWaiting);
+    const threads: Threads = yield* makeThreads(currentWorkspace, makeAdapter, showWaiting, {
+      storagePath: path.join(storagePath, 'worktrees'),
+      setupCommand: (where) => Option.getOrUndefined(readSetting('worktree.setupCommand', Schema.NonEmptyString, vscode.Uri.file(where.cwd))),
+    });
     const webviewReady = yield* disposable(() => new vscode.EventEmitter<vscode.WebviewView>());
     yield* registerSidebar(extensionUri, threads, (view) => {
       sidebar = view;
@@ -95,6 +106,10 @@ function startServices(
     const commands = {
       'uniAgent.newThread': () => run(Effect.zipRight(threads.create(), revealSidebar)),
       'uniAgent.newThreadWithAgent': () => run(pickAgent(threads)),
+      'uniAgent.newWorktreeThread': () => run(showWorktreeError(pickAgent(threads, true))),
+      'uniAgent.reviewWorktree': () => run(showWorktreeError(reviewWorktree(threads, channel))),
+      'uniAgent.openWorktree': () => run(showWorktreeError(openWorktree(threads))),
+      'uniAgent.removeWorktree': () => run(showWorktreeError(removeShownWorktree(threads))),
       'uniAgent.showThreadHistory': () => run(pickThread(threads)),
       'uniAgent.showLogs': () => channel.show(),
       'uniAgent.openSettings': () => void vscode.commands.executeCommand('workbench.action.openSettings', '@ext:uni-agent.uni-agent'),
@@ -107,7 +122,7 @@ function startServices(
   });
 }
 
-type Services = ClaudeSdk | Stdio | Executables | Ids | Branches | ModeSettings | FullAutoOptIn;
+type Services = ClaudeSdk | Stdio | Executables | Ids | Branches | ModeSettings | FullAutoOptIn | GitRunner;
 
 const revealSidebar = Effect.promise(async () => vscode.commands.executeCommand(`${SIDEBAR_VIEW_ID}.focus`));
 
@@ -147,7 +162,7 @@ function threadNote(thread: Thread, current: boolean): string | undefined {
 }
 
 /** Starts a thread with the agent the user picks; a stand-in until the agent picker lands. */
-function pickAgent(threads: Threads): Effect.Effect<void> {
+function pickAgent(threads: Threads, isolated = false): Effect.Effect<void, GitFailed | WorktreeSetupFailed> {
   return Effect.gen(function* () {
     const shown = threads.current?.info.agent;
     const items = AgentKind.literals.map((agent) => ({
@@ -156,11 +171,58 @@ function pickAgent(threads: Threads): Effect.Effect<void> {
       agent,
     }));
     const picked = yield* Effect.promise(async () =>
-      vscode.window.showQuickPick(items, { title: 'New Thread With Agent', placeHolder: 'Choose the agent the new thread talks to' })
+      vscode.window.showQuickPick(items, { title: isolated ? 'New Worktree Thread' : 'New Thread With Agent', placeHolder: 'Choose the agent the new thread talks to' })
     );
     if (picked) {
-      yield* threads.create(picked.agent);
+      yield* (isolated ? threads.createInWorktree(picked.agent) : threads.create(picked.agent));
       yield* revealSidebar;
+    }
+  });
+}
+
+function showWorktreeError<A>(effect: Effect.Effect<A, GitFailed | WorktreeSetupFailed>): Effect.Effect<A | void> {
+  return Effect.catchAll(effect, (error) => Effect.sync(() => {
+    void vscode.window.showErrorMessage(`Worktree operation failed: ${error.reason}`);
+  }));
+}
+
+function reviewWorktree(threads: Threads, channel: vscode.LogOutputChannel) {
+  return Effect.flatMap(threads.reviewCurrentWorktree(), (review) => Effect.sync(() => {
+    if (!review) {
+      void vscode.window.showInformationMessage('The shown thread uses the shared workspace.');
+      return;
+    }
+    channel.appendLine(`Worktree ${review.worktree.path} (${review.worktree.branch})`);
+    channel.appendLine(review.status || 'No changes');
+    channel.appendLine(review.diffStat || 'No diff');
+    channel.show();
+  }));
+}
+
+function openWorktree(threads: Threads) {
+  return Effect.flatMap(threads.reviewCurrentWorktree(), (review) => Effect.promise(async () => {
+    if (review) {
+      await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(review.worktree.path), true);
+    } else {
+      await vscode.window.showInformationMessage('The shown thread uses the shared workspace.');
+    }
+  }));
+}
+
+function removeShownWorktree(threads: Threads) {
+  return Effect.gen(function* () {
+    const review = yield* threads.reviewCurrentWorktree();
+    if (!review) {
+      yield* Effect.promise(async () => vscode.window.showInformationMessage('The shown thread uses the shared workspace.'));
+      return;
+    }
+    const answer = yield* Effect.promise(async () => vscode.window.showWarningMessage(
+      `Remove worktree ${review.worktree.branch}?`,
+      { modal: true, detail: review.status ? `Uncommitted changes will be deleted:\n${review.status}` : 'The checkout will be removed.' },
+      'Remove, Keep Branch', 'Discard Branch'
+    ));
+    if (answer) {
+      yield* threads.removeCurrentWorktree(answer === 'Discard Branch');
     }
   });
 }
