@@ -24,6 +24,9 @@ export interface AgentAdapter {
    * refuses the switch, the adapter keeps its previous mode and fails.
    */
   setMode(mode: Mode): Effect.Effect<void, ModeChangeFailed>;
+
+  /** Changes the model for subsequent prompts. */
+  setModel(model: string | undefined): Effect.Effect<void, ModelChangeFailed>;
 }
 
 /** Receives every event an adapter emits, in order. */
@@ -67,6 +70,11 @@ export function binaryMissingMessage(agent: AgentKind, command: string, executab
 export class ModeChangeFailed extends Data.TaggedError('ModeChangeFailed')<{
   readonly agent: AgentKind;
   readonly mode: Mode;
+  readonly reason: string;
+}> {}
+
+export class ModelChangeFailed extends Data.TaggedError('ModelChangeFailed')<{
+  readonly agent: AgentKind;
   readonly reason: string;
 }> {}
 

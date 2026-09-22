@@ -53,6 +53,10 @@ export interface Threads {
    * in, so the thread keeps its mode and the webview keeps showing it.
    */
   setMode(threadId: string, mode: Mode): Effect.Effect<void>;
+  /** Changes an empty thread's agent in place; accepted prompts lock the agent. */
+  setAgent(threadId: string, agent: AgentKind): Effect.Effect<void>;
+  /** Changes a thread's selected model between prompts. */
+  setModel(threadId: string, model: string | undefined): Effect.Effect<void>;
 }
 
 /** The agent a thread talks to when nothing chose one. */
@@ -133,6 +137,26 @@ export function makeThreads<R>(
         yield* show(thread);
         return thread;
       });
+
+    const setAgent = (threadId: string, agent: AgentKind) => serial(Effect.gen(function* () {
+      const old = current;
+      if (!old || old.info.id !== threadId || !old.isEmpty || old.info.agent === agent) {
+        return;
+      }
+      const oldScope = threadScopes.get(threadId);
+      if (!oldScope) {
+        return;
+      }
+      const nextScope = yield* Scope.fork(scope, ExecutionStrategy.sequential);
+      const next = yield* makeThread(threadId, old.workspace, makeAdapter(agent, old.workspace), onChanged, undefined, undefined, old.mode).pipe(
+        Scope.extend(nextScope), Effect.provide(context)
+      );
+      yield* old.detach();
+      threadScopes.set(threadId, nextScope);
+      threads.splice(threads.indexOf(old), 1, next);
+      yield* show(next);
+      yield* Scope.close(oldScope, Exit.void);
+    }));
 
     const create = (agent = current?.info.agent ?? DEFAULT_AGENT) =>
       Effect.gen(function* () {
@@ -260,6 +284,11 @@ export function makeThreads<R>(
               yield* thread.setMode(mode);
             }),
         }),
+      setAgent,
+      setModel: (threadId, model) => serial(Option.match(find(threadId), {
+        onNone: () => Effect.logWarning(`Ignored a model for unknown thread ${threadId}`),
+        onSome: (thread) => thread.setModel(model),
+      })),
     };
   });
 }

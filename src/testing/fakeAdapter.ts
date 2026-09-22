@@ -10,6 +10,7 @@ export class FakeAdapter implements AgentAdapter {
   readonly answers: [string, string][] = [];
   /** The mode the adapter was built with, then each one the thread switched it to. */
   readonly modes: Mode[];
+  readonly models: (string | undefined)[] = [];
   /** Set by a test to make the agent refuse every mode switch. */
   refusesModes = false;
   disposed = false;
@@ -66,6 +67,10 @@ export class FakeAdapter implements AgentAdapter {
     return Effect.suspend(() =>
       this.refusesModes ? new ModeChangeFailed({ agent: this.agent, mode, reason: 'refused by the test' }) : Effect.sync(() => void this.modes.push(mode))
     );
+  }
+
+  setModel(model: string | undefined): Effect.Effect<void> {
+    return Effect.sync(() => { this.models.push(model); });
   }
 
   /** Announces a permission request the test can then answer. */

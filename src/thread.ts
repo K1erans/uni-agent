@@ -45,6 +45,7 @@ export interface Thread {
   readonly needsApproval: boolean;
   /** How freely the agent may act; new threads start in {@link DEFAULT_MODE}. */
   readonly mode: Mode;
+  readonly selectedModel: string | undefined;
   /** Connects a webview, replacing any previous one, and sends it the history so far. */
   attach(post: Post): Effect.Effect<void>;
   /** Stops forwarding events to the connected webview. */
@@ -62,6 +63,8 @@ export interface Thread {
    * refuses, the thread keeps its mode and logs why. Checking Full auto is allowed is the caller's job.
    */
   setMode(mode: Mode): Effect.Effect<void>;
+  /** Changes the selected model between prompts, keeping the provider and session. */
+  setModel(model: string | undefined): Effect.Effect<void>;
 }
 
 /**
@@ -103,6 +106,8 @@ export function makeThread<R>(
     let mode = initialMode;
     let sessionId: string | undefined;
     let configuredModel: string | undefined;
+    let defaultReportedModel: string | undefined;
+    let selectedModel = model;
     // Mode changes arrive on fibers of their own; one at a time keeps the mode shown in step with
     // the one the agent runs in.
     const modeLock = yield* Effect.makeSemaphore(1);
@@ -113,6 +118,7 @@ export function makeThread<R>(
           sessionId = event.sessionId;
         } else if (event.type === 'session_configured') {
           configuredModel = event.model;
+          defaultReportedModel ??= event.model;
         }
         if (event.type === 'turn_started' && title === undefined) {
           title = threadTitle(event.prompt.map((block) => block.text).join('\n'));
@@ -164,10 +170,13 @@ export function makeThread<R>(
       get mode() {
         return mode;
       },
+      get selectedModel() {
+        return selectedModel;
+      },
       attach: (next) =>
         Effect.suspend(() => {
           post = next;
-          return next({ type: 'history', thread: info, mode, events: [...history] });
+          return next({ type: 'history', thread: info, mode, model: selectedModel ?? null, events: [...history] });
         }),
       detach: () => Effect.sync(() => (post = undefined)),
       prompt,
@@ -197,6 +206,21 @@ export function makeThread<R>(
             )
           )
         ),
+      setModel: (next) => Effect.gen(function* () {
+        if (running) {
+          return;
+        }
+        const changed = yield* Effect.either(adapter.setModel(next));
+        if (changed._tag === 'Left') {
+          yield* Effect.logWarning(`${AGENT_NAMES[adapter.agent]} refused the model change: ${changed.left.reason}`);
+          return;
+        }
+        selectedModel = next;
+        configuredModel = next ?? defaultReportedModel;
+        if (post) {
+          yield* post({ type: 'model', threadId: id, model: next ?? null });
+        }
+      }),
     };
   });
 }

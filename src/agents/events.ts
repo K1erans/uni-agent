@@ -13,6 +13,10 @@ import { Schema } from 'effect';
 export const AgentKind = Schema.Literal('claude', 'codex', 'cursor');
 export type AgentKind = typeof AgentKind.Type;
 
+/** A model offered by the selected agent, with its native ID and picker label. */
+export const ModelInfo = Schema.Struct({ id: Schema.NonEmptyString, name: Schema.NonEmptyString });
+export type ModelInfo = typeof ModelInfo.Type;
+
 export const AGENT_NAMES = { claude: 'Claude Code', codex: 'Codex', cursor: 'Cursor' } satisfies Record<AgentKind, string>;
 
 /**

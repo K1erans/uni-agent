@@ -1,6 +1,6 @@
 import { Option, Schema } from 'effect';
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
-import type { Mode } from '../../src/agents/events';
+import type { AgentKind, Mode } from '../../src/agents/events';
 import { ExtensionMessage, type WebviewMessage } from '../../src/protocol';
 import { Composer } from './Composer';
 import { AGENT_NAMES } from './labels';
@@ -111,6 +111,27 @@ export function App({ post, drafts }: AppProps) {
     [post]
   );
 
+  useEffect(() => {
+    const thread = state.thread;
+    if (thread) {
+      post({ type: 'get_models', threadId: thread.id, agent: thread.agent });
+    }
+  }, [post, state.thread?.id, state.thread?.agent]);
+
+  const setAgent = useCallback((agent: AgentKind) => {
+    const { thread, items } = latest.current;
+    if (thread && !items.some((item) => item.kind === 'turn')) {
+      post({ type: 'set_agent', threadId: thread.id, agent });
+    }
+  }, [post]);
+
+  const setModel = useCallback((model: string | null) => {
+    const { thread, running } = latest.current;
+    if (thread && !running) {
+      post({ type: 'set_model', threadId: thread.id, agent: thread.agent, model });
+    }
+  }, [post]);
+
   const agentName = state.thread ? AGENT_NAMES[state.thread.agent] : 'the agent';
   return (
     <main className="sidebar">
@@ -125,6 +146,14 @@ export function App({ post, drafts }: AppProps) {
         rejection={threadId === undefined ? undefined : rejections.get(threadId)}
         canSend={state.thread !== undefined && !state.running && draft.trim() !== ''}
         agentName={agentName}
+        agent={state.thread?.agent}
+        agentLocked={state.running || state.items.some((item) => item.kind === 'turn')}
+        onAgentChange={setAgent}
+        selectedModel={state.selectedModel}
+        models={state.models}
+        modelError={state.modelError}
+        onModelChange={setModel}
+        modelBusy={state.running}
         mode={state.mode}
         onModeChange={state.thread ? setMode : undefined}
         config={state.config}

@@ -1,6 +1,6 @@
 import { Deferred, Effect, Option, type Context, type Schema, type Scope } from 'effect';
 import type { Ids } from '../ids';
-import { binaryMissingMessage, TurnInProgress, type AdapterOptions, type AgentAdapter, type ModeChangeFailed, type UnknownPermissionRequest } from './adapter';
+import { binaryMissingMessage, ModelChangeFailed, TurnInProgress, type AdapterOptions, type AgentAdapter, type ModeChangeFailed, type UnknownPermissionRequest } from './adapter';
 import { Approvals } from './approvals';
 import { AGENT_NAMES, MODE_NAMES, type AgentEvent, type AgentKind, type ContentBlock, type Mode, type StopReason } from './events';
 import type { Executables } from './findExecutable';
@@ -25,6 +25,7 @@ export abstract class BaseAdapter<T extends Turn> implements AgentAdapter {
   protected mode: Mode;
   /** Whether the scope has closed, so the process stopping is expected rather than a crash. */
   protected disposed = false;
+  protected selectedModel: string | undefined;
   /**
    * Lets one mode change run at a time. A refused change restores the mode it replaced, which is
    * only right if no other change has landed since.
@@ -40,6 +41,7 @@ export abstract class BaseAdapter<T extends Turn> implements AgentAdapter {
   ) {
     this.approvals = new Approvals((event) => this.options.onEvent(event));
     this.mode = options.mode;
+    this.selectedModel = options.model;
   }
 
   /** Makes a turn of this adapter's kind. */
@@ -115,6 +117,20 @@ export abstract class BaseAdapter<T extends Turn> implements AgentAdapter {
       })
     );
   }
+
+  setModel(model: string | undefined): Effect.Effect<void, ModelChangeFailed> {
+    return Effect.suspend(() => {
+      if (this.turn) {
+        return new ModelChangeFailed({ agent: this.agent, reason: 'Wait for the current prompt to finish.' });
+      }
+      const previous = this.selectedModel;
+      this.selectedModel = model;
+      return Effect.tapError(this.applyModel(model), () => Effect.sync(() => { this.selectedModel = previous; }));
+    });
+  }
+
+  /** Applies a model to an already open session; unopened sessions use selectedModel when they start. */
+  protected abstract applyModel(model: string | undefined): Effect.Effect<void, ModelChangeFailed>;
 
   /**
    * The agent's native settings for the current mode: the user's override for it, if the agent's

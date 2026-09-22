@@ -1,6 +1,6 @@
 import { Effect, Option, Schema, type Deferred, type Scope } from 'effect';
 import { Ids } from '../../ids';
-import { ModeChangeFailed, notSignedInMessage, type AdapterOptions } from '../adapter';
+import { ModeChangeFailed, ModelChangeFailed, notSignedInMessage, type AdapterOptions } from '../adapter';
 import { ContentBlock, MODE_NAMES, PermissionOption, StopReason, ToolCallStatus, ToolKind, type ToolCall, type ToolCallContent } from '../events';
 import { Executables } from '../findExecutable';
 import { ModeSettings } from '../modes';
@@ -124,6 +124,8 @@ export class CursorAdapter extends JsonRpcAdapter<CursorTurn> {
   private loading = false;
   /** The session's mode and the modes it offers; the offer is unknown if the agent did not report it. */
   private sessionMode: SessionModes = { current: undefined, available: Option.none() };
+  private modelConfigId: string | undefined;
+  private defaultModelId: string | undefined;
 
   static make(options: AdapterOptions): Effect.Effect<CursorAdapter, never, Stdio | Executables | Ids | ModeSettings | Scope.Scope> {
     return Effect.gen(function* () {
@@ -194,11 +196,13 @@ export class CursorAdapter extends JsonRpcAdapter<CursorTurn> {
   /** Selects a requested model from the session's live catalog before its first prompt. */
   private selectModel(rpc: JsonRpcConnection, sessionId: string, session: typeof SessionOpened.Type): Effect.Effect<string, TurnError> {
     return Effect.gen(this, function* () {
-      const requested = this.options.model;
+      const config = session.configOptions?.map((option) => Option.getOrUndefined(decodeModelConfigOption(option))).find((option) => option?.category === 'model' || option?.id === 'model');
+      this.modelConfigId = config?.id;
+      this.defaultModelId ??= config?.currentValue ?? session.models?.currentModelId;
+      const requested = this.selectedModel;
       if (!requested) {
         return opened(sessionId, session).model;
       }
-      const config = session.configOptions?.map((option) => Option.getOrUndefined(decodeModelConfigOption(option))).find((option) => option?.category === 'model' || option?.id === 'model');
       if (config) {
         const chosen = modelChoice(config.options, requested);
         if (!chosen) {
@@ -222,6 +226,30 @@ export class CursorAdapter extends JsonRpcAdapter<CursorTurn> {
         yield* rpc.request('session/set_model', { sessionId, modelId: chosen.value }, WireMessage);
       }
       return chosen.name;
+    });
+  }
+
+  protected applyModel(model: string | undefined): Effect.Effect<void, ModelChangeFailed> {
+    return this.withSession((rpc, sessionId) => {
+      const chosen = model ?? this.defaultModelId;
+      if (chosen === undefined) {
+        return Effect.void;
+      }
+      const failed = (reason: string) => new ModelChangeFailed({ agent: this.agent, reason });
+      if (this.modelConfigId) {
+        const configId = this.modelConfigId;
+        return rpc.request('session/set_config_option', { sessionId, configId, value: chosen }, ConfigOptionsChanged).pipe(
+          Effect.mapError((error) => failed(error._tag === 'ConnectionClosed' ? error.reason : error.message)),
+          Effect.flatMap((changed) => {
+            const selected = changed.configOptions.map((option) => Option.getOrUndefined(decodeModelConfigOption(option))).find((option) => option?.id === configId);
+            return selected?.currentValue === chosen ? Effect.void : failed(`Cursor did not select model "${chosen}".`);
+          })
+        );
+      }
+      return Effect.asVoid(Effect.mapError(rpc.request('session/set_model', { sessionId, modelId: chosen }, WireMessage), (error) => new ModelChangeFailed({
+        agent: this.agent,
+        reason: error._tag === 'ConnectionClosed' ? error.reason : error.message,
+      })));
     });
   }
 

@@ -13,7 +13,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { Context, type Deferred, Effect, Layer, Option, Queue, Runtime, Schema, type Scope, Stream } from 'effect';
 import { Ids } from '../../ids';
-import { ModeChangeFailed, notSignedInMessage, type AdapterOptions } from '../adapter';
+import { ModeChangeFailed, ModelChangeFailed, notSignedInMessage, type AdapterOptions } from '../adapter';
 import { BaseAdapter } from '../baseAdapter';
 import type { AgentErrorCode, ContentBlock, StopReason, ToolCall, ToolCallStatus } from '../events';
 import { Executables } from '../findExecutable';
@@ -24,7 +24,7 @@ import { ClaudeModeOverrides, claudeNoLooser, claudePermissionMode } from './cla
 import { describeTool, permissionOptions, ToolResultContent, toolResultContent } from './claudeTools';
 
 /** The part of the Agent SDK's `Query` the adapter uses; lets tests substitute a fake agent. */
-export type ClaudeQuery = AsyncIterable<SDKMessage> & Pick<Query, 'interrupt' | 'close' | 'setPermissionMode'>;
+export type ClaudeQuery = AsyncIterable<SDKMessage> & Pick<Query, 'interrupt' | 'close' | 'setPermissionMode' | 'setModel' | 'supportedModels'>;
 
 export type ClaudeQueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => ClaudeQuery;
 
@@ -206,6 +206,16 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
     });
   }
 
+  protected applyModel(model: string | undefined): Effect.Effect<void, ModelChangeFailed> {
+    const connection = this.connection;
+    return connection
+      ? Effect.tryPromise({
+          try: () => connection.query.setModel(model),
+          catch: (error) => new ModelChangeFailed({ agent: this.agent, reason: error instanceof Error ? error.message : String(error) }),
+        })
+      : Effect.void;
+  }
+
   private permissionMode(): Effect.Effect<PermissionMode> {
     return this.native(claudePermissionMode, ClaudeModeOverrides, claudeNoLooser);
   }
@@ -234,8 +244,8 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
         systemPrompt: { type: 'preset', preset: 'claude_code' },
         env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: 'uni-agent' },
       };
-      if (this.options.model) {
-        connectionOptions.model = this.options.model;
+      if (this.selectedModel) {
+        connectionOptions.model = this.selectedModel;
       }
       const connection = yield* Connection.open(this.sdk.query, connectionOptions);
       this.connection = connection;

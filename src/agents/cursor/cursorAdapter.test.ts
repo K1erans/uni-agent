@@ -69,6 +69,28 @@ describe('CursorAdapter', () => {
     expect(setup.events).toContainEqual({ type: 'session_configured', model: 'Grok 4.7', permissionMode: 'agent' });
   });
 
+  it('switches the open session model and can return to its default', async () => {
+    const models = {
+      id: 'model', category: 'model', type: 'select', currentValue: 'default[]',
+      options: [{ value: 'default[]', name: 'Auto' }, { value: 'grok-4.7', name: 'Grok 4.7' }],
+    };
+    const setup = setupAdapter(CursorAdapter.make, [[
+      ...initialize, request(2, 'session/new', { cwd: '/workspace', mcpServers: [] }),
+      result(2, { sessionId: SESSION, ...SESSION_CONFIG, configOptions: [models] }),
+      prompt(3, 'one'), result(3, { stopReason: 'end_turn' }),
+      request(4, 'session/set_config_option', { sessionId: SESSION, configId: 'model', value: 'grok-4.7' }),
+      result(4, { configOptions: [{ ...models, currentValue: 'grok-4.7' }] }),
+      prompt(5, 'two'), result(5, { stopReason: 'end_turn' }),
+      request(6, 'session/set_config_option', { sessionId: SESSION, configId: 'model', value: 'default[]' }),
+      result(6, { configOptions: [models] }),
+    ]]);
+    expect(await setup.prompt('one')).toBe('end_turn');
+    await Effect.runPromise(setup.adapter.setModel('grok-4.7'));
+    expect(await setup.prompt('two')).toBe('end_turn');
+    await Effect.runPromise(setup.adapter.setModel(undefined));
+    expect(setup.errors()).toEqual([]);
+  });
+
   it('refuses an unavailable requested model before sending a prompt', async () => {
     const setup = setupAdapter(CursorAdapter.make, [[...handshake]], undefined, undefined, { model: 'Grok 4.7' });
 
