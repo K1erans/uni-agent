@@ -4,8 +4,8 @@ import { AGENT_NAMES } from './agents/events';
 import { ModeSettings } from './agents/modes';
 
 /** Reads a `uniAgent.*` setting; a value that does not match the schema counts as unset. */
-export function readSetting<A, I>(key: string, schema: Schema.Schema<A, I>): Option.Option<A> {
-  return Schema.decodeUnknownOption(schema)(vscode.workspace.getConfiguration('uniAgent').get(key));
+export function readSetting<A, I>(key: string, schema: Schema.Schema<A, I>, resource?: vscode.Uri): Option.Option<A> {
+  return Schema.decodeUnknownOption(schema)(vscode.workspace.getConfiguration('uniAgent', resource).get(key));
 }
 
 /**

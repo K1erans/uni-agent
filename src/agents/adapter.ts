@@ -34,7 +34,7 @@ export type EventSink = (event: AgentEvent) => Effect.Effect<void>;
  * reports through the sink if it cannot. Closing the scope stops the agent process and ends a
  * running turn as `cancelled`.
  */
-export type MakeAdapter<R> = (onEvent: EventSink, mode: Mode) => Effect.Effect<AgentAdapter, never, R | Scope.Scope>;
+export type MakeAdapter<R> = (onEvent: EventSink, mode: Mode, model?: string) => Effect.Effect<AgentAdapter, never, R | Scope.Scope>;
 
 /** What every adapter is built with. */
 export interface AdapterOptions {
@@ -44,6 +44,8 @@ export interface AdapterOptions {
   readonly executablePath: Option.Option<string>;
   /** The mode the session starts in. */
   readonly mode: Mode;
+  /** Native model ID requested for this session; omitted to use the agent's default. */
+  readonly model?: string;
   readonly onEvent: EventSink;
 }
 

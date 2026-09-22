@@ -1,10 +1,14 @@
-import { Effect, ExecutionStrategy, Exit, Option, Scope } from 'effect';
+import { Effect, Either, ExecutionStrategy, Exit, Option, Scope } from 'effect';
 import type { MakeAdapter } from './agents/adapter';
 import type { AgentKind, Mode } from './agents/events';
 import { Branches } from './branches';
 import { FullAutoOptIn } from './fullAutoOptIn';
 import { Ids } from './ids';
-import { makeThread, type Post, type Thread, type Workspace } from './thread';
+import { makeThread, type Post, type PromptAdmission, type Thread, type Workspace } from './thread';
+import type { PromptRejection } from './protocol';
+import { GitFailed, GitRunner, inspectWorktree, prepareWorktree, removeWorktree, type Worktree, type WorktreeSetupFailed } from './worktrees';
+
+export type PromptOutcome = { readonly status: 'accepted' } | { readonly status: 'rejected'; readonly reason: PromptRejection };
 
 /**
  * The window's threads and the one the sidebar shows. The sidebar webview connects when it loads
@@ -30,10 +34,18 @@ export interface Threads {
    * none). A current thread with that agent that nobody has prompted yet is shown again instead.
    */
   create(agent?: AgentKind): Effect.Effect<Thread>;
+  /** Creates a thread in an isolated checkout; setup must finish before it is shown. */
+  createInWorktree(agent?: AgentKind): Effect.Effect<Thread, GitFailed | WorktreeSetupFailed>;
+  /** Reports the shown worktree's changes, if the shown thread has one. */
+  reviewCurrentWorktree(): Effect.Effect<{ readonly worktree: Worktree; readonly status: string; readonly diffStat: string } | undefined, GitFailed>;
+  /** Stops and removes the shown worktree thread; optionally discards its branch. */
+  removeCurrentWorktree(discardBranch: boolean): Effect.Effect<boolean, GitFailed>;
   /** Shows the thread with this ID; unknown IDs are ignored. */
   select(threadId: string): Effect.Effect<void>;
-  /** Sends a prompt to the thread with this ID, whether or not it is shown. */
-  prompt(threadId: string, text: string): Effect.Effect<void>;
+  /** Sends an intentional background prompt to a thread, shown or not. */
+  prompt(threadId: string, text: string): Effect.Effect<PromptOutcome>;
+  /** Admits a sidebar prompt only while that webview still shows its named thread. */
+  submitSidebar(post: Post, threadId: string, text: string): Effect.Effect<PromptOutcome>;
   /** Answers a permission request in the thread with this ID, whether or not it is shown. */
   respond(threadId: string, requestId: string, optionId: string): Effect.Effect<void>;
   /**
@@ -54,13 +66,15 @@ const DEFAULT_AGENT: AgentKind = 'claude';
 export function makeThreads<R>(
   workspace: () => Workspace,
   makeAdapter: (agent: AgentKind, workspace: Workspace) => MakeAdapter<R>,
-  onChanged: () => Effect.Effect<void> = () => Effect.void
-): Effect.Effect<Threads, never, R | Ids | Branches | FullAutoOptIn | Scope.Scope> {
+  onChanged: () => Effect.Effect<void> = () => Effect.void,
+  worktreeConfig?: { readonly storagePath: string; readonly setupCommand: (workspace: Workspace) => string | undefined }
+): Effect.Effect<Threads, never, R | Ids | Branches | FullAutoOptIn | GitRunner | Scope.Scope> {
   return Effect.gen(function* () {
     const scope = yield* Effect.scope;
     const ids = yield* Ids;
     const branches = yield* Branches;
     const fullAuto = yield* FullAutoOptIn;
+    const git = yield* GitRunner;
     const context = yield* Effect.context<R>();
     // Serialises everything that changes which thread is shown or connected, since VS Code
     // callbacks can start them concurrently.
@@ -68,6 +82,8 @@ export function makeThreads<R>(
     const serial = lock.withPermits(1);
 
     const threads: Thread[] = [];
+    const worktrees = new Map<string, Worktree>();
+    const threadScopes = new Map<string, Scope.CloseableScope>();
     let current: Thread | undefined;
     let connected: Post | undefined;
     // Webviews VS Code has disposed. Checked under the lock, so a connection queued behind the
@@ -102,23 +118,56 @@ export function makeThreads<R>(
           .pipe(Scope.extend(watch));
       });
 
+    const openThread = (id: string, agent: AgentKind, where: Workspace, threadScope: Scope.CloseableScope, checkout?: Worktree) =>
+      Effect.gen(function* () {
+        const location = checkout ? { cwd: checkout.path, name: `${where.name ?? 'Workspace'} · worktree` } : where;
+        const thread = yield* makeThread(id, location, makeAdapter(agent, location), onChanged).pipe(
+          Scope.extend(threadScope),
+          Effect.provide(context)
+        );
+        if (checkout) {
+          worktrees.set(id, checkout);
+        }
+        threadScopes.set(id, threadScope);
+        threads.unshift(thread);
+        yield* show(thread);
+        return thread;
+      });
+
     const create = (agent = current?.info.agent ?? DEFAULT_AGENT) =>
       Effect.gen(function* () {
         const where = workspace();
         if (current?.isEmpty && current.info.agent === agent && current.workspace.cwd === where.cwd) {
           return current;
         }
+        const id = yield* ids.next;
         const threadScope = yield* Scope.fork(scope, ExecutionStrategy.sequential);
-        const thread = yield* makeThread(yield* ids.next, where, makeAdapter(agent, where), onChanged).pipe(
-          Scope.extend(threadScope),
-          Effect.provide(context)
-        );
-        threads.unshift(thread);
-        yield* show(thread);
-        return thread;
+        return yield* openThread(id, agent, where, threadScope);
+      });
+
+    const createInWorktree = (agent = current?.info.agent ?? DEFAULT_AGENT) =>
+      Effect.gen(function* () {
+        if (!worktreeConfig) {
+          return yield* new GitFailed({ operation: 'worktree add', reason: 'Worktree storage is not configured.' });
+        }
+        const where = workspace();
+        const id = yield* ids.next;
+        const threadScope = yield* Scope.fork(scope, ExecutionStrategy.sequential);
+        return yield* Effect.gen(function* () {
+          const checkout = yield* prepareWorktree(where.cwd, worktreeConfig.storagePath, id, worktreeConfig.setupCommand(where))
+            .pipe(Effect.provideService(GitRunner, git));
+          return yield* openThread(id, agent, where, threadScope, checkout);
+        }).pipe(Effect.onError(() => Scope.close(threadScope, Exit.void)));
       });
 
     const find = (threadId: string) => Option.fromNullable(threads.find((thread) => thread.info.id === threadId));
+    const outcome = (admission: PromptAdmission): PromptOutcome =>
+      admission.status === 'accepted' ? { status: 'accepted' } : { status: 'rejected', reason: admission.reason };
+    const prompt = (threadId: string, text: string): Effect.Effect<PromptOutcome> =>
+      Option.match(find(threadId), {
+        onNone: () => Effect.succeed({ status: 'rejected', reason: 'unknown' } as const),
+        onSome: (thread) => Effect.map(thread.prompt(text), outcome),
+      });
 
     return {
       get current() {
@@ -147,6 +196,41 @@ export function makeThreads<R>(
           })
         ),
       create: (agent) => serial(create(agent)),
+      createInWorktree: (agent) => serial(createInWorktree(agent)),
+      reviewCurrentWorktree: () => Effect.suspend(() => {
+        const checkout = current && worktrees.get(current.info.id);
+        return checkout
+          ? Effect.map(inspectWorktree(checkout).pipe(Effect.provideService(GitRunner, git)), (review) => ({ worktree: checkout, ...review }))
+          : Effect.succeed(undefined);
+      }),
+      removeCurrentWorktree: (discardBranch) => serial(Effect.gen(function* () {
+        const shown = current;
+        const checkout = shown && worktrees.get(shown.info.id);
+        if (!shown || !checkout) {
+          return false;
+        }
+        yield* shown.detach();
+        const threadScope = threadScopes.get(shown.info.id);
+        if (threadScope) {
+          yield* Scope.close(threadScope, Exit.void);
+        }
+        const removal = yield* removeWorktree(checkout, discardBranch).pipe(Effect.provideService(GitRunner, git), Effect.either);
+        threadScopes.delete(shown.info.id);
+        worktrees.delete(shown.info.id);
+        threads.splice(threads.indexOf(shown), 1);
+        current = undefined;
+        yield* stopBranchWatch;
+        const next = threads[0];
+        if (next) {
+          yield* show(next);
+        } else if (connected) {
+          yield* create();
+        }
+        if (Either.isLeft(removal)) {
+          return yield* removal.left;
+        }
+        return true;
+      })),
       select: (threadId) =>
         serial(
           Option.match(find(threadId), {
@@ -154,11 +238,12 @@ export function makeThreads<R>(
             onSome: show,
           })
         ),
-      prompt: (threadId, text) =>
-        Option.match(find(threadId), {
-          onNone: () => Effect.logWarning(`Ignored a prompt for unknown thread ${threadId}`),
-          onSome: (thread) => thread.prompt(text),
-        }),
+      prompt,
+      submitSidebar: (post, threadId, text) => serial(Effect.suspend(() =>
+        connected !== post || current?.info.id !== threadId
+          ? Effect.succeed({ status: 'rejected', reason: 'stale' } as const)
+          : prompt(threadId, text)
+      )),
       respond: (threadId, requestId, optionId) =>
         Option.match(find(threadId), {
           onNone: () => Effect.logWarning(`Ignored an answer for unknown thread ${threadId}`),

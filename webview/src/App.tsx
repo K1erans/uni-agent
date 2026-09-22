@@ -28,11 +28,15 @@ export function App({ post, drafts }: AppProps) {
   const [state, dispatch] = useReducer(threadReducer, emptyThread);
   // Each thread keeps its own draft, so switching thread never sends one thread's draft to another.
   const [draftsByThread, setDraftsByThread] = useState<Drafts>(() => drafts?.load() ?? new Map());
+  const [rejections, setRejections] = useState<ReadonlyMap<string, string>>(new Map());
+  const pending = useRef(new Map<string, { submissionId: string; text: string }>());
+  const nextSubmission = useRef(0);
   const threadId = state.thread?.id;
   const draft = threadId === undefined ? '' : (draftsByThread.get(threadId) ?? '');
   const setDraft = (text: string) => {
     if (threadId !== undefined) {
       setDraftsByThread((previous) => withDraft(previous, threadId, text));
+      setRejections((previous) => withoutReason(previous, threadId));
     }
   };
   // Read by the stable callbacks below, so memoised turns do not re-render when these change.
@@ -40,7 +44,26 @@ export function App({ post, drafts }: AppProps) {
   latest.current = state;
 
   useEffect(() => {
-    const onMessage = (event: MessageEvent) => Option.map(decodeExtensionMessage(event.data), dispatch);
+    const onMessage = (event: MessageEvent) => Option.map(decodeExtensionMessage(event.data), (message) => {
+      if (message.type === 'prompt_result') {
+        const submitted = pending.current.get(message.threadId);
+        if (!submitted || submitted.submissionId !== message.submissionId) {
+          return;
+        }
+        pending.current.delete(message.threadId);
+        if (message.status === 'accepted') {
+          setDraftsByThread((previous) => previous.get(message.threadId) === submitted.text ? withDraft(previous, message.threadId, '') : previous);
+        } else {
+          setRejections((previous) => new Map(previous).set(message.threadId, rejectionReason(message.reason)));
+          if (latest.current.thread?.id === message.threadId) {
+            latest.current = threadReducer(latest.current, { type: 'prompt_rejected' });
+            dispatch({ type: 'prompt_rejected' });
+          }
+        }
+        return;
+      }
+      dispatch(message);
+    });
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
   }, []);
@@ -57,7 +80,10 @@ export function App({ post, drafts }: AppProps) {
       if (!thread || running || !text.trim()) {
         return;
       }
-      post({ type: 'prompt', threadId: thread.id, text });
+      const submissionId = `submission-${++nextSubmission.current}`;
+      pending.current.set(thread.id, { submissionId, text });
+      setRejections((previous) => withoutReason(previous, thread.id));
+      post({ type: 'prompt', threadId: thread.id, submissionId, text });
       // Also update the ref now, so a second send before React re-renders is refused too.
       latest.current = threadReducer(latest.current, { type: 'prompt_sent' });
       dispatch({ type: 'prompt_sent' });
@@ -95,8 +121,8 @@ export function App({ post, drafts }: AppProps) {
         onDraftChange={setDraft}
         onSend={() => {
           sendPrompt(draft);
-          setDraft('');
         }}
+        rejection={threadId === undefined ? undefined : rejections.get(threadId)}
         canSend={state.thread !== undefined && !state.running && draft.trim() !== ''}
         agentName={agentName}
         mode={state.mode}
@@ -107,6 +133,24 @@ export function App({ post, drafts }: AppProps) {
       />
     </main>
   );
+}
+
+function rejectionReason(reason: 'busy' | 'stale' | 'empty' | 'unknown'): string {
+  switch (reason) {
+    case 'busy': return 'This thread is busy. Your message is still here.';
+    case 'stale': return 'The shown thread changed. Your message is still here.';
+    case 'empty': return 'Enter a message before sending.';
+    case 'unknown': return 'This thread is no longer available. Your message is still here.';
+  }
+}
+
+function withoutReason(reasons: ReadonlyMap<string, string>, threadId: string): ReadonlyMap<string, string> {
+  if (!reasons.has(threadId)) {
+    return reasons;
+  }
+  const next = new Map(reasons);
+  next.delete(threadId);
+  return next;
 }
 
 function withDraft(drafts: Drafts, threadId: string, text: string): Drafts {

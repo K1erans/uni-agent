@@ -50,6 +50,26 @@
         "category": "Uni Agent"
       },
       {
+        "command": "uniAgent.newWorktreeThread",
+        "title": "New Worktree Thread…",
+        "category": "Uni Agent"
+      },
+      {
+        "command": "uniAgent.reviewWorktree",
+        "title": "Review Worktree Changes",
+        "category": "Uni Agent"
+      },
+      {
+        "command": "uniAgent.openWorktree",
+        "title": "Open Worktree in New Window",
+        "category": "Uni Agent"
+      },
+      {
+        "command": "uniAgent.removeWorktree",
+        "title": "Remove Worktree…",
+        "category": "Uni Agent"
+      },
+      {
         "command": "uniAgent.showThreadHistory",
         "title": "Thread History",
         "category": "Uni Agent",
@@ -82,6 +102,26 @@
           "command": "uniAgent.newThreadWithAgent",
           "when": "view == uniAgent.sidebar",
           "group": "1_uniAgent@0"
+        },
+        {
+          "command": "uniAgent.newWorktreeThread",
+          "when": "view == uniAgent.sidebar",
+          "group": "1_uniAgent@0.5"
+        },
+        {
+          "command": "uniAgent.reviewWorktree",
+          "when": "view == uniAgent.sidebar",
+          "group": "1_uniAgent@3"
+        },
+        {
+          "command": "uniAgent.openWorktree",
+          "when": "view == uniAgent.sidebar",
+          "group": "1_uniAgent@4"
+        },
+        {
+          "command": "uniAgent.removeWorktree",
+          "when": "view == uniAgent.sidebar",
+          "group": "1_uniAgent@5"
         },
         {
           "command": "uniAgent.showLogs",
@@ -270,6 +310,12 @@
           "type": "boolean",
           "default": false,
           "description": "Write detailed activity to the Uni Agent output channel."
+        },
+        "uniAgent.worktree.setupCommand": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "markdownDescription": "Command to run in each new worktree before its first turn. Configure it for this repository when dependency setup is needed."
         }
       }
     }

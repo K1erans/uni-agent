@@ -15,12 +15,29 @@ function setup() {
     thread,
     adapter: made[0],
     attach: (post: (message: ExtensionMessage) => void) => Effect.runSync(thread.attach((message) => Effect.sync(() => post(message)))),
-    prompt: (text: string) => Effect.runPromise(Effect.andThen(thread.prompt(text), Effect.yieldNow())),
+    prompt: (text: string) => Effect.runPromise(Effect.tap(thread.prompt(text), () => Effect.yieldNow())),
     close: () => Effect.runPromise(Scope.close(scope, Exit.void)),
   };
 }
 
 describe('Thread', () => {
+  it('reserves one turn, rejects a busy prompt, and returns its reviewable result', async () => {
+    const { thread, adapter, prompt } = setup();
+    expect(await prompt('   ')).toEqual({ status: 'rejected', reason: 'empty' });
+    const admitted = await prompt('First');
+    expect(admitted.status).toBe('accepted');
+    expect(await prompt('Second')).toEqual({ status: 'rejected', reason: 'busy' });
+    await adapter.say('Done.');
+    await adapter.endTurn();
+    if (admitted.status !== 'accepted') {
+      throw new Error('Expected an accepted prompt');
+    }
+    expect(await Effect.runPromise(admitted.completion)).toMatchObject({
+      agent: 'claude', sessionId: adapter.sessionId, stopReason: 'end_turn', response: 'Done.',
+    });
+    expect(thread.title).toBe('First');
+  });
+
   it('replays its history to every webview that attaches, then forwards new events', async () => {
     const { adapter, attach, prompt } = setup();
     const first = vi.fn();

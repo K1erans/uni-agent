@@ -26,7 +26,7 @@ const decodeBranch = Schema.decodeUnknownOption(Schema.NonEmptyString);
 
 /**
  * VS Code's Git API, or none when the Git extension is missing or disabled (`git.enabled`, or a
- * restricted-mode workspace). Uni Agent never runs `git` itself.
+ * restricted-mode workspace). Worktree operations use git separately through GitRunner.
  */
 const gitApi: Effect.Effect<Option.Option<GitApi>> = Effect.gen(function* () {
   const extension = vscode.extensions.getExtension<GitExtension>('vscode.git');

@@ -70,7 +70,7 @@ describe('App', () => {
     expect(post).not.toHaveBeenCalled();
   });
 
-  it('posts the draft to the shown thread and clears it', () => {
+  it('keeps the draft until the thread accepts it', () => {
     const post = vi.fn();
     render(<App post={post} />);
     open();
@@ -79,8 +79,23 @@ describe('App', () => {
     expect(sendButton().disabled).toBe(false);
     fireEvent.click(sendButton());
 
-    expect(post).toHaveBeenCalledWith({ type: 'prompt', threadId: 'thread-1', text: 'Hello' });
+    expect(post).toHaveBeenCalledWith({ type: 'prompt', threadId: 'thread-1', submissionId: 'submission-1', text: 'Hello' });
+    expect(input().value).toBe('Hello');
+    receive({ type: 'prompt_result', threadId: 'thread-1', submissionId: 'submission-1', status: 'accepted' });
     expect(input().value).toBe('');
+  });
+
+  it('preserves a rejected draft and shows the reason beside it', () => {
+    const post = vi.fn();
+    render(<App post={post} />);
+    open();
+    type('Try again');
+    fireEvent.click(sendButton());
+
+    receive({ type: 'prompt_result', threadId: 'thread-1', submissionId: 'submission-1', status: 'rejected', reason: 'busy' });
+    expect(input().value).toBe('Try again');
+    expect(screen.getByRole('alert').textContent).toContain('busy');
+    expect(sendButton().disabled).toBe(false);
   });
 
   it('sends on Enter, but not on Shift+Enter or while an IME composition is open', () => {
@@ -94,7 +109,7 @@ describe('App', () => {
     expect(post).not.toHaveBeenCalled();
 
     fireEvent.keyDown(input(), { key: 'Enter' });
-    expect(post).toHaveBeenCalledWith({ type: 'prompt', threadId: 'thread-1', text: 'こんにちは' });
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ type: 'prompt', threadId: 'thread-1', text: 'こんにちは' }));
   });
 
   it('blocks sending from the moment a prompt is posted, before the turn starts', () => {
@@ -156,7 +171,7 @@ describe('App', () => {
     expect(screen.getByText('Copied')).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: 'Retry prompt' }));
-    expect(post).toHaveBeenLastCalledWith({ type: 'prompt', threadId: 'thread-1', text: 'Count' });
+    expect(post).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'prompt', threadId: 'thread-1', text: 'Count' }));
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Retry prompt' }).disabled).toBe(true);
   });
 
@@ -228,7 +243,7 @@ describe('App', () => {
     // The first thread's turn was still running, but the new thread can take a prompt.
     type('Second thread');
     fireEvent.click(sendButton());
-    expect(post).toHaveBeenCalledWith({ type: 'prompt', threadId: 'thread-2', text: 'Second thread' });
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ type: 'prompt', threadId: 'thread-2', text: 'Second thread' }));
   });
 
   it('keeps each thread’s unsent draft, including while the sidebar is hidden', () => {

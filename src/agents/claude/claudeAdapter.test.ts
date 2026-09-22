@@ -81,6 +81,8 @@ interface SetupOptions {
   answer?: Answer;
   /** The mode the adapter starts in; defaults to Auto-edit. */
   mode?: Mode;
+  /** Native model requested for this session. */
+  model?: string;
   /** The mode settings the adapter reads; defaults to no overrides. */
   settings?: Layer.Layer<ModeSettings>;
   /** Makes running Claude processes refuse every permission mode switch. */
@@ -100,6 +102,7 @@ function setup(
     findClaude = () => Option.some('/usr/local/bin/claude'),
     answer,
     mode = DEFAULT_MODE,
+    model,
     settings = ModeSettings.none,
     refuseSwitch = false,
     settleSwitch = async () => undefined,
@@ -136,7 +139,7 @@ function setup(
   // The sink reaches the adapter to answer its asks, and only ever runs once it has been built.
   let built: ClaudeAdapter | undefined;
   built = Effect.runSync(
-    ClaudeAdapter.make({ cwd: '/workspace', executablePath, mode, onEvent: recordingSink(events, answer, () => built) }).pipe(
+    ClaudeAdapter.make({ cwd: '/workspace', executablePath, mode, model, onEvent: recordingSink(events, answer, () => built) }).pipe(
       Scope.extend(scope),
       Effect.provide(services)
     )
@@ -164,6 +167,13 @@ const chunks = (events: AgentEvent[]) =>
   );
 
 describe('ClaudeAdapter', () => {
+  it('passes a requested model to the Claude SDK', async () => {
+    const { started, prompt } = setup([[{ dir: 'send', data: userMessage('hi') }, { dir: 'recv', data: result() }]], { model: 'claude-sonnet-4-6' });
+
+    await prompt('hi');
+    expect(started[0].model).toBe('claude-sonnet-4-6');
+  });
+
   it('generates the session ID up front and hands it to Claude', async () => {
     const { adapter, events, started, prompt } = setup([[{ dir: 'send', data: userMessage('hi') }, { dir: 'recv', data: result() }]]);
 
