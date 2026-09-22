@@ -11,7 +11,7 @@ const THREAD = 'thread-a';
 const TURN = 'codex-turn-1';
 
 /** Starts `codex app-server` and a thread, taking request IDs 1 to 3. */
-function handshake(open: TrafficLine = request(3, 'thread/start', { cwd: '/workspace' })): TrafficLine[] {
+function handshake(open: TrafficLine = request(3, 'thread/start', { cwd: '/workspace' }), model = 'gpt-6'): TrafficLine[] {
   return [
     request(1, 'initialize', { clientInfo: CLIENT_INFO, capabilities: null }),
     result(1, { userAgent: 'codex' }),
@@ -19,7 +19,7 @@ function handshake(open: TrafficLine = request(3, 'thread/start', { cwd: '/works
     request(2, 'account/read', {}),
     result(2, { account: { type: 'chatgpt' }, requiresOpenaiAuth: true }),
     open,
-    result(3, { thread: { id: THREAD }, model: 'gpt-6', approvalPolicy: 'on-request' }),
+    result(3, { thread: { id: THREAD }, model, approvalPolicy: 'on-request' }),
   ];
 }
 
@@ -94,6 +94,26 @@ describe('CodexAdapter', () => {
     ]]);
     expect(await setup.prompt('one')).toBe('end_turn');
     await Effect.runPromise(setup.adapter.setModel('gpt-6-astra'));
+    expect(await setup.prompt('two')).toBe('end_turn');
+    expect(setup.errors()).toEqual([]);
+  });
+
+  it('returns to the catalog default after a thread began with an explicit model', async () => {
+    const setup = setupAdapter(CodexAdapter.make, [[
+      ...handshake(request(3, 'thread/start', { cwd: '/workspace', model: 'gpt-6-astra' }), 'gpt-6-astra'),
+      ...turnStart(4, 'one'), turnCompleted('completed'),
+      request(5, 'model/list', {}),
+      result(5, { data: [
+        { model: 'gpt-6-astra', isDefault: false },
+        { model: 'gpt-6-sol', isDefault: true },
+      ], nextCursor: null }),
+      request(6, 'turn/start', {
+        threadId: THREAD, input: [{ type: 'text', text: 'two', text_elements: [] }], ...AUTO_EDIT, model: 'gpt-6-sol',
+      }),
+      result(6, { turn: { id: TURN } }), turnCompleted('completed'),
+    ]], undefined, undefined, { model: 'gpt-6-astra' });
+    expect(await setup.prompt('one')).toBe('end_turn');
+    await Effect.runPromise(setup.adapter.setModel(undefined));
     expect(await setup.prompt('two')).toBe('end_turn');
     expect(setup.errors()).toEqual([]);
   });
