@@ -18,6 +18,7 @@ export type MakeStdioAdapter = (options: AdapterOptions) => Effect.Effect<AgentA
 /** The mode an adapter starts in, and the mode settings it reads; by default Auto-edit with no overrides. */
 export interface ModeSetup {
   readonly mode?: Mode;
+  readonly model?: string;
   readonly settings?: Layer.Layer<ModeSettings>;
 }
 
@@ -115,7 +116,7 @@ export function setupAdapter(
   processes: ReadonlyArray<readonly TrafficLine[]>,
   find: (name: string) => Option.Option<string> = (name) => Option.some(`/usr/local/bin/${name}`),
   answer?: Answer,
-  { mode = DEFAULT_MODE, settings = ModeSettings.none }: ModeSetup = {}
+  { mode = DEFAULT_MODE, model, settings = ModeSettings.none }: ModeSetup = {}
 ) {
   const events: AgentEvent[] = [];
   const spawned: StdioCommand[] = [];
@@ -131,7 +132,7 @@ export function setupAdapter(
   // The sink reaches the adapter to answer its asks, and only ever runs once it has been built.
   let built: AgentAdapter | undefined;
   built = Effect.runSync(
-    make({ cwd: '/workspace', executablePath: Option.none(), mode, onEvent: recordingSink(events, answer, () => built) }).pipe(
+    make({ cwd: '/workspace', executablePath: Option.none(), mode, model, onEvent: recordingSink(events, answer, () => built) }).pipe(
       Scope.extend(scope),
       Effect.provide(services)
     )

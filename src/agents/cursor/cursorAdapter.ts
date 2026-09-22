@@ -23,6 +23,7 @@ const Initialized = Schema.Struct({
 
 /** The result of `session/new` and `session/load`: the session's model and mode, when the agent has them. */
 const SessionOpened = Schema.Struct({
+  configOptions: Schema.optional(Schema.Array(WireMessage)),
   models: Schema.optional(
     Schema.Struct({
       currentModelId: Schema.String,
@@ -33,6 +34,16 @@ const SessionOpened = Schema.Struct({
     Schema.Struct({ currentModeId: Schema.String, availableModes: Schema.optional(Schema.Array(Schema.Struct({ id: Schema.String }))) })
   ),
 });
+
+const ModelConfigOption = Schema.Struct({
+  id: Schema.String,
+  category: Schema.optional(Schema.String),
+  type: Schema.Literal('select'),
+  currentValue: Schema.String,
+  options: Schema.Array(Schema.Struct({ value: Schema.String, name: Schema.String })),
+});
+const decodeModelConfigOption = Schema.decodeUnknownOption(ModelConfigOption);
+const ConfigOptionsChanged = Schema.Struct({ configOptions: Schema.Array(WireMessage) });
 
 /** The ACP session mode a session runs in, and the ones it offers. */
 interface SessionModes {
@@ -175,7 +186,42 @@ export class CursorAdapter extends JsonRpcAdapter<CursorTurn> {
         available: Option.fromNullable(modes?.availableModes?.map((mode) => mode.id)),
       };
       yield* this.switchMode(rpc, sessionId);
-      return { ...opened(sessionId, session), permissionMode: this.sessionMode.current ?? 'default' };
+      const model = yield* this.selectModel(rpc, sessionId, session);
+      return { ...opened(sessionId, session), model, permissionMode: this.sessionMode.current ?? 'default' };
+    });
+  }
+
+  /** Selects a requested model from the session's live catalog before its first prompt. */
+  private selectModel(rpc: JsonRpcConnection, sessionId: string, session: typeof SessionOpened.Type): Effect.Effect<string, TurnError> {
+    return Effect.gen(this, function* () {
+      const requested = this.options.model;
+      if (!requested) {
+        return opened(sessionId, session).model;
+      }
+      const config = session.configOptions?.map((option) => Option.getOrUndefined(decodeModelConfigOption(option))).find((option) => option?.category === 'model' || option?.id === 'model');
+      if (config) {
+        const chosen = modelChoice(config.options, requested);
+        if (!chosen) {
+          return yield* new AgentFailure({ code: 'agent_error', message: `Cursor does not offer model "${requested}" in this session.` });
+        }
+        if (chosen.value === config.currentValue) {
+          return chosen.name;
+        }
+        const changed = yield* rpc.request('session/set_config_option', { sessionId, configId: config.id, value: chosen.value }, ConfigOptionsChanged);
+        const selected = changed.configOptions.map((option) => Option.getOrUndefined(decodeModelConfigOption(option))).find((option) => option?.id === config.id);
+        if (selected?.currentValue !== chosen.value) {
+          return yield* new AgentFailure({ code: 'agent_error', message: `Cursor did not select model "${requested}".` });
+        }
+        return chosen.name;
+      }
+      const chosen = modelChoice(session.models?.availableModels.map(({ modelId, name }) => ({ value: modelId, name })) ?? [], requested);
+      if (!chosen) {
+        return yield* new AgentFailure({ code: 'agent_error', message: `Cursor does not offer model "${requested}" in this session.` });
+      }
+      if (chosen.value !== session.models?.currentModelId) {
+        yield* rpc.request('session/set_model', { sessionId, modelId: chosen.value }, WireMessage);
+      }
+      return chosen.name;
     });
   }
 
@@ -347,4 +393,9 @@ function permissionOptions(options: typeof RequestPermission.Type.options): Perm
 function opened(sessionId: string, { models, modes }: typeof SessionOpened.Type): OpenedSession {
   const model = models && (models.availableModels.find((available) => available.modelId === models.currentModelId)?.name ?? models.currentModelId);
   return { sessionId, model: model ?? 'default', permissionMode: modes?.currentModeId ?? 'default' };
+}
+
+function modelChoice<T extends { readonly value: string; readonly name: string }>(choices: ReadonlyArray<T>, requested: string): T | undefined {
+  const normalized = requested.trim().toLowerCase().replaceAll(' ', '-');
+  return choices.find((choice) => choice.value.toLowerCase() === normalized) ?? choices.find((choice) => choice.name.toLowerCase().replaceAll(' ', '-') === normalized);
 }

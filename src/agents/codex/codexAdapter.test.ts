@@ -73,6 +73,17 @@ describe('CodexAdapter', () => {
     expect(events[2]).toEqual({ type: 'session_configured', model: 'gpt-6', permissionMode: 'on-request' });
   });
 
+  it('passes a requested model when creating a Codex thread', async () => {
+    const setup = setupAdapter(CodexAdapter.make, [[
+      ...handshake(request(3, 'thread/start', { cwd: '/workspace', model: 'gpt-6-astra' })),
+      ...turnStart(4, 'hi'),
+      turnCompleted('completed'),
+    ]], undefined, undefined, { model: 'gpt-6-astra' });
+
+    expect(await setup.prompt('hi')).toBe('end_turn');
+    expect(setup.errors()).toEqual([]);
+  });
+
   it('streams agent message and reasoning deltas, and shows completed items that never streamed', async () => {
     const { chunks, errors, prompt } = setupAdapter(CodexAdapter.make, [
       [

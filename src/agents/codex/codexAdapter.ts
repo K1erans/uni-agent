@@ -131,7 +131,12 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
         return yield* new AgentFailure({ code: 'not_signed_in', message: notSignedInMessage('codex', 'codex login') });
       }
       const { thread, model, approvalPolicy } = yield* Option.match(resume, {
-        onNone: () => rpc.request('thread/start', { cwd: this.options.cwd }, ThreadOpened),
+        onNone: () => {
+          if (this.options.model) {
+            return rpc.request('thread/start', { cwd: this.options.cwd, model: this.options.model }, ThreadOpened);
+          }
+          return rpc.request('thread/start', { cwd: this.options.cwd }, ThreadOpened);
+        },
         onSome: (threadId) => rpc.request('thread/resume', { threadId }, ThreadOpened),
       });
       return { sessionId: thread.id, model, permissionMode: Predicate.isString(approvalPolicy) ? approvalPolicy : 'custom' };

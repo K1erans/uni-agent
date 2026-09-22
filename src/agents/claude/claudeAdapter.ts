@@ -222,7 +222,7 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
         return this.connection;
       }
       const runtime = yield* Effect.runtime<never>();
-      const connection = yield* Connection.open(this.sdk.query, {
+      const connectionOptions: Options = {
         cwd: this.options.cwd,
         pathToClaudeCodeExecutable: executable,
         permissionMode,
@@ -233,7 +233,11 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
         includePartialMessages: true,
         systemPrompt: { type: 'preset', preset: 'claude_code' },
         env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: 'uni-agent' },
-      });
+      };
+      if (this.options.model) {
+        connectionOptions.model = this.options.model;
+      }
+      const connection = yield* Connection.open(this.sdk.query, connectionOptions);
       this.connection = connection;
       yield* Effect.logDebug(`Started Claude Code (${executable}) for session ${this.sessionId}`);
       yield* Effect.forkIn(this.consume(connection), this.scope);

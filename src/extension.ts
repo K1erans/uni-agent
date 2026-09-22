@@ -1,11 +1,10 @@
 import * as os from 'node:os';
 import { Effect, Exit, Layer, Runtime, Schema, Scope } from 'effect';
 import * as vscode from 'vscode';
-import type { AdapterOptions, AgentAdapter, MakeAdapter } from './agents/adapter';
-import { ClaudeAdapter, ClaudeSdk } from './agents/claude/claudeAdapter';
-import { CodexAdapter } from './agents/codex/codexAdapter';
-import { CursorAdapter } from './agents/cursor/cursorAdapter';
+import type { MakeAdapter } from './agents/adapter';
+import { ClaudeSdk } from './agents/claude/claudeAdapter';
 import { AGENT_NAMES, AgentKind } from './agents/events';
+import { makeAgentAdapter } from './agents/factory';
 import { Executables } from './agents/findExecutable';
 import type { ModeSettings } from './agents/modes';
 import { Stdio } from './agents/stdio';
@@ -172,16 +171,10 @@ function currentWorkspace(): Workspace {
   return folder ? { cwd: folder.uri.fsPath, name: folder.name } : { cwd: os.homedir(), name: null };
 }
 
-const ADAPTERS = {
-  claude: ClaudeAdapter.make,
-  codex: CodexAdapter.make,
-  cursor: CursorAdapter.make,
-} satisfies Record<AgentKind, (options: AdapterOptions) => Effect.Effect<AgentAdapter, never, Services | Scope.Scope>>;
-
 /** Each agent's CLI is found through its own machine-scoped `uniAgent.<agent>.executablePath` setting. */
 function makeAdapter(agent: AgentKind, workspace: Workspace): MakeAdapter<Services> {
-  return (onEvent, mode) =>
-    ADAPTERS[agent]({ cwd: workspace.cwd, executablePath: readSetting(`${agent}.executablePath`, Schema.NonEmptyString), mode, onEvent });
+  return (onEvent, mode, model) =>
+    makeAgentAdapter(agent, { cwd: workspace.cwd, executablePath: readSetting(`${agent}.executablePath`, Schema.NonEmptyString), mode, model, onEvent });
 }
 
 export function deactivate(): void {

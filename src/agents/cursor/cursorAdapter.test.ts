@@ -50,6 +50,32 @@ describe('CursorAdapter', () => {
     expect(setup.events[2]).toEqual({ type: 'session_configured', model: 'GPT-6', permissionMode: 'agent' });
   });
 
+  it('selects a requested model from Cursor session options before sending the prompt', async () => {
+    const models = {
+      id: 'model', category: 'model', type: 'select', currentValue: 'default[]',
+      options: [{ value: 'default[]', name: 'Auto' }, { value: 'grok-4.7[effort=high]', name: 'Grok 4.7' }],
+    };
+    const setup = setupAdapter(CursorAdapter.make, [[
+      ...initialize,
+      request(2, 'session/new', { cwd: '/workspace', mcpServers: [] }),
+      result(2, { sessionId: SESSION, ...SESSION_CONFIG, configOptions: [models] }),
+      request(3, 'session/set_config_option', { sessionId: SESSION, configId: 'model', value: 'grok-4.7[effort=high]' }),
+      result(3, { configOptions: [{ ...models, currentValue: 'grok-4.7[effort=high]' }] }),
+      prompt(4, 'Implement the plan'),
+      result(4, { stopReason: 'end_turn' }),
+    ]], undefined, undefined, { model: 'Grok 4.7' });
+
+    expect(await setup.prompt('Implement the plan')).toBe('end_turn');
+    expect(setup.events).toContainEqual({ type: 'session_configured', model: 'Grok 4.7', permissionMode: 'agent' });
+  });
+
+  it('refuses an unavailable requested model before sending a prompt', async () => {
+    const setup = setupAdapter(CursorAdapter.make, [[...handshake]], undefined, undefined, { model: 'Grok 4.7' });
+
+    expect(await setup.prompt('Implement the plan')).toBe('error');
+    expect(setup.errors()).toEqual([expect.objectContaining({ code: 'agent_error', message: 'Cursor does not offer model "Grok 4.7" in this session.' })]);
+  });
+
   it('streams chunks, grouping consecutive chunks of one kind into a message', async () => {
     const setup = setupAdapter(CursorAdapter.make, [
       [
