@@ -2,6 +2,7 @@ import {
   DEFAULT_MODE,
   type AgentErrorCode,
   type Mode,
+  type ModelInfo,
   type PermissionOption,
   type PermissionOutcome,
   type StopReason,
@@ -77,6 +78,9 @@ export interface ThreadState {
   thread: ThreadInfo | undefined;
   /** How freely the thread's agent may act, as the extension last reported it. */
   mode: Mode;
+  selectedModel: string | null;
+  models: ReadonlyArray<ModelInfo> | undefined;
+  modelError: string | null;
   /** What the agent last reported running the session with; undefined until its process starts. */
   config: SessionConfig | undefined;
   /** The branch checked out in the thread's workspace, if known. */
@@ -91,6 +95,9 @@ export interface ThreadState {
 export const emptyThread: ThreadState = {
   thread: undefined,
   mode: DEFAULT_MODE,
+  selectedModel: null,
+  models: undefined,
+  modelError: null,
   config: undefined,
   branch: null,
   items: [],
@@ -107,12 +114,18 @@ export type ThreadAction = ExtensionMessage | { type: 'prompt_sent' } | { type: 
 export function threadReducer(state: ThreadState, action: ThreadAction): ThreadState {
   switch (action.type) {
     case 'history':
-      return action.events.reduce(applyEvent, { ...emptyThread, thread: action.thread, mode: action.mode });
+      return action.events.reduce(applyEvent, { ...emptyThread, thread: action.thread, mode: action.mode, selectedModel: action.model });
     case 'event':
       // Events only come from the shown thread; this guards against one crossing a thread switch.
       return action.threadId === state.thread?.id ? applyEvent(state, action) : state;
     case 'mode':
       return action.threadId === state.thread?.id ? { ...state, mode: action.mode } : state;
+    case 'model':
+      return action.threadId === state.thread?.id ? { ...state, selectedModel: action.model } : state;
+    case 'models':
+      return action.threadId === state.thread?.id && action.agent === state.thread.agent
+        ? { ...state, models: action.models, modelError: action.error?.message ?? null }
+        : state;
     case 'branch':
       return { ...state, branch: action.name };
     case 'prompt_sent':

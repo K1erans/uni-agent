@@ -123,6 +123,42 @@ describe('Threads', () => {
     expect(threads.list().map((thread) => thread.info.agent)).toEqual(['cursor', 'codex', 'claude']);
   });
 
+  it('changes an empty thread’s agent under the same ID, then locks it on the first accepted prompt', async () => {
+    const { threads, made, run } = setup();
+    const view = webview();
+    await run(threads.connect(view.post));
+
+    await run(threads.setAgent('thread-1', 'codex'));
+    expect(threads.current?.info).toMatchObject({ id: 'thread-1', agent: 'codex' });
+    expect(threads.list()).toHaveLength(1);
+    expect(made[0].disposed).toBe(true);
+    expect(historyOf(view.messages)).toMatchObject({ thread: { id: 'thread-1', agent: 'codex' }, model: null });
+
+    await run(threads.prompt('thread-1', 'First'));
+    await run(threads.setAgent('thread-1', 'cursor'));
+    expect(threads.current?.info.agent).toBe('codex');
+  });
+
+  it('applies model changes between prompts and keeps the selection in history', async () => {
+    const { threads, made, run } = setup();
+    const view = webview();
+    await run(threads.connect(view.post));
+    await run(threads.setModel('thread-1', 'model-a'));
+    expect(made[0].models).toEqual(['model-a']);
+    expect(threads.current?.selectedModel).toBe('model-a');
+
+    await run(threads.prompt('thread-1', 'First'));
+    await run(threads.setModel('thread-1', 'model-b'));
+    expect(made[0].models).toEqual(['model-a']);
+    await made[0].endTurn();
+    await run(threads.setModel('thread-1', 'model-b'));
+    expect(made[0].models).toEqual(['model-a', 'model-b']);
+    await run(threads.disconnect(view.post));
+    const reopened = webview();
+    await run(threads.connect(reopened.post));
+    expect(historyOf(reopened.messages)).toMatchObject({ model: 'model-b' });
+  });
+
   it('switches threads, forwarding only the shown thread and replaying the one switched back to', async () => {
     const { threads, made, run, watching } = setup();
     const view = webview();

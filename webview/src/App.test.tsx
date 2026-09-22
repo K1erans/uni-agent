@@ -16,7 +16,7 @@ const THREAD: ThreadInfo = { id: 'thread-1', agent: 'claude', workspace: 'uni-ag
 
 /** Shows a thread with these events, as the extension does when the webview reports ready. */
 function open(events: AgentEvent[] = [{ type: 'session_started', agent: 'claude', sessionId: 's1' }], thread = THREAD, mode: Mode = 'auto_edit') {
-  receive({ type: 'history', thread, mode, events: events.map((event) => ({ event, at: 0 })) });
+  receive({ type: 'history', thread, mode, model: null, events: events.map((event) => ({ event, at: 0 })) });
 }
 
 function event(agentEvent: AgentEvent, at = 0) {
@@ -44,7 +44,7 @@ describe('App', () => {
 
     expect(screen.getByRole('heading', { name: 'New thread' })).toBeTruthy();
     expect(screen.getByRole('img', { name: 'Status: Ready' })).toBeTruthy();
-    expect(screen.getByText('Claude Code')).toBeTruthy();
+    expect(screen.getByRole('combobox', { name: 'Agent' })).toBeTruthy();
     expect(screen.getByText('No messages yet.')).toBeTruthy();
     expect(input().placeholder).toBe('Message Claude Code…');
     expect(sendButton().disabled).toBe(true);
@@ -55,8 +55,43 @@ describe('App', () => {
     render(<App post={() => {}} />);
     open([], { id: 'thread-2', agent: 'codex', workspace: 'uni-agent' });
 
-    expect(screen.getByText('Codex')).toBeTruthy();
+    expect(screen.getByRole<HTMLSelectElement>('combobox', { name: 'Agent' }).value).toBe('codex');
     expect(input().placeholder).toBe('Message Codex…');
+  });
+
+  it('offers providers before a prompt, filters models, and locks the provider after the prompt', () => {
+    const post = vi.fn();
+    render(<App post={post} />);
+    open();
+    type('Keep this draft');
+    const agent = screen.getByRole<HTMLSelectElement>('combobox', { name: 'Agent' });
+    fireEvent.change(agent, { target: { value: 'cursor' } });
+    expect(post).toHaveBeenLastCalledWith({ type: 'set_agent', threadId: 'thread-1', agent: 'cursor' });
+    open([], { ...THREAD, agent: 'cursor' });
+    expect(input().value).toBe('Keep this draft');
+    receive({ type: 'models', threadId: 'thread-1', agent: 'cursor', models: [{ id: 'cursor-model', name: 'Cursor Model' }], error: null });
+    const model = screen.getByRole<HTMLSelectElement>('combobox', { name: 'Model' });
+    expect(model.disabled).toBe(false);
+    fireEvent.change(model, { target: { value: 'cursor-model' } });
+    expect(post).toHaveBeenLastCalledWith({ type: 'set_model', threadId: 'thread-1', agent: 'cursor', model: 'cursor-model' });
+    event(turnStarted('Keep this draft'));
+    expect(agent.disabled).toBe(true);
+    expect(model.disabled).toBe(true);
+    event(turnEnded());
+    expect(model.disabled).toBe(false);
+  });
+
+  it('shows discovery failure and keeps the default model available for a prompt', () => {
+    const post = vi.fn();
+    render(<App post={post} />);
+    open();
+    receive({ type: 'models', threadId: 'thread-1', agent: 'claude', models: [], error: { _tag: 'ModelDiscoveryFailed', message: 'CLI unavailable' } });
+    expect(screen.getByRole('alert').textContent).toContain('CLI unavailable');
+    expect(screen.getByRole<HTMLSelectElement>('combobox', { name: 'Model' }).disabled).toBe(true);
+    type('Try the default');
+    expect(sendButton().disabled).toBe(false);
+    fireEvent.click(sendButton());
+    expect(post).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'prompt', text: 'Try the default' }));
   });
 
   it('cannot send before the extension has sent a thread', () => {
@@ -67,7 +102,7 @@ describe('App', () => {
     fireEvent.keyDown(input(), { key: 'Enter' });
 
     expect(sendButton().disabled).toBe(true);
-    expect(post).not.toHaveBeenCalled();
+    expect(post).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'prompt' }));
   });
 
   it('keeps the draft until the thread accepts it', () => {
@@ -106,7 +141,7 @@ describe('App', () => {
 
     fireEvent.keyDown(input(), { key: 'Enter', isComposing: true });
     fireEvent.keyDown(input(), { key: 'Enter', shiftKey: true });
-    expect(post).not.toHaveBeenCalled();
+    expect(post).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'prompt' }));
 
     fireEvent.keyDown(input(), { key: 'Enter' });
     expect(post).toHaveBeenCalledWith(expect.objectContaining({ type: 'prompt', threadId: 'thread-1', text: 'こんにちは' }));
@@ -123,7 +158,7 @@ describe('App', () => {
 
     expect(sendButton().disabled).toBe(true);
     fireEvent.keyDown(input(), { key: 'Enter' });
-    expect(post).toHaveBeenCalledTimes(1);
+    expect(post.mock.calls.filter(([message]) => message.type === 'prompt')).toHaveLength(1);
     expect(input().value).toBe('Second');
 
     event(turnStarted('First'));
@@ -175,18 +210,19 @@ describe('App', () => {
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Retry prompt' }).disabled).toBe(true);
   });
 
-  it('shows the session settings the agent reports; all but the mode are disabled until they can be changed', () => {
+  it('shows discovered models and the agent session settings', () => {
     render(<App post={() => {}} />);
     open();
 
-    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Model: Default model' }).disabled).toBe(true);
+    expect(screen.getByRole<HTMLSelectElement>('combobox', { name: 'Model' }).disabled).toBe(true);
     expect(screen.getByRole('button', { name: 'Workspace: uni-agent' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: /^Branch/ })).toBeNull();
 
     event({ type: 'session_configured', model: 'claude-opus-5', permissionMode: 'acceptEdits' });
+    receive({ type: 'models', threadId: 'thread-1', agent: 'claude', models: [{ id: 'claude-opus-5', name: 'Opus 5' }], error: null });
     receive({ type: 'branch', name: 'main' });
 
-    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Model: claude-opus-5' }).disabled).toBe(true);
+    expect(screen.getByRole<HTMLSelectElement>('combobox', { name: 'Model' }).disabled).toBe(false);
     expect(modePicker().title).toContain('Claude Code runs it as Accept edits');
     expect(screen.getByRole('button', { name: 'Reasoning: Default' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Branch: main' })).toBeTruthy();
@@ -260,7 +296,7 @@ describe('App', () => {
     open([], { id: 'thread-2', agent: 'claude', workspace: 'uni-agent' });
     expect(input().value).toBe('');
     fireEvent.keyDown(input(), { key: 'Enter' });
-    expect(post).not.toHaveBeenCalled();
+    expect(post).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'prompt' }));
     type('For the second thread');
 
     unmount();

@@ -1,6 +1,6 @@
 import { Effect, Option, Predicate, Schema, type Deferred, type Scope } from 'effect';
 import { Ids } from '../../ids';
-import { notSignedInMessage, type AdapterOptions, type ModeChangeFailed } from '../adapter';
+import { notSignedInMessage, type AdapterOptions, type ModeChangeFailed, type ModelChangeFailed } from '../adapter';
 import type { AgentErrorCode, ContentBlock, StopReason, ToolCall } from '../events';
 import { Executables } from '../findExecutable';
 import { ModeSettings } from '../modes';
@@ -108,6 +108,8 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
   readonly agent = 'codex' as const;
   protected readonly command = 'codex';
   protected readonly args = ['app-server'];
+  private defaultModel: string | undefined;
+  private modelChanged = false;
 
   static make(options: AdapterOptions): Effect.Effect<CodexAdapter, never, Stdio | Executables | Ids | ModeSettings | Scope.Scope> {
     return Effect.gen(function* () {
@@ -132,13 +134,14 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
       }
       const { thread, model, approvalPolicy } = yield* Option.match(resume, {
         onNone: () => {
-          if (this.options.model) {
-            return rpc.request('thread/start', { cwd: this.options.cwd, model: this.options.model }, ThreadOpened);
+          if (this.selectedModel) {
+            return rpc.request('thread/start', { cwd: this.options.cwd, model: this.selectedModel }, ThreadOpened);
           }
           return rpc.request('thread/start', { cwd: this.options.cwd }, ThreadOpened);
         },
         onSome: (threadId) => rpc.request('thread/resume', { threadId }, ThreadOpened),
       });
+      this.defaultModel ??= model;
       return { sessionId: thread.id, model, permissionMode: Predicate.isString(approvalPolicy) ? approvalPolicy : 'custom' };
     });
   }
@@ -148,7 +151,15 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
       const input = prompt.map((block) => ({ type: 'text', text: block.text, text_elements: [] }));
       // Every turn names its policy, so a mode changed since the last turn applies to this one.
       const { approvalPolicy, sandbox } = yield* this.native(codexPolicy, CodexModeOverrides, codexNoLooser);
-      const started = yield* rpc.request('turn/start', { threadId, input, approvalPolicy, sandboxPolicy: sandboxPolicy(sandbox) }, TurnStarted);
+      const params = {
+        threadId, input, approvalPolicy, sandboxPolicy: sandboxPolicy(sandbox),
+      };
+      const wanted = this.selectedModel ?? this.defaultModel;
+      const started = yield* rpc.request('turn/start', this.modelChanged && wanted ? { ...params, model: wanted } : params, TurnStarted);
+      if (this.modelChanged && wanted) {
+        yield* this.emit({ type: 'session_configured', model: wanted, permissionMode: approvalPolicy });
+      }
+      this.modelChanged = false;
       turn.codexTurnId = started.turn.id;
       // A cancel that arrived before Codex named the turn could not interrupt it then.
       if (turn.cancelRequested) {
@@ -160,6 +171,11 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
   /** Codex takes its approval policy and sandbox with each turn, so a new mode applies from the next one. */
   protected applyMode(): Effect.Effect<void, ModeChangeFailed> {
     return Effect.void;
+  }
+
+  protected applyModel(): Effect.Effect<void, ModelChangeFailed> {
+    // Codex reads the model from each turn/start, so the next prompt applies this selection.
+    return Effect.sync(() => { this.modelChanged = true; });
   }
 
   protected interrupt(turn: CodexTurn): Effect.Effect<void> {

@@ -51,6 +51,7 @@ describe('Thread', () => {
       type: 'history',
       thread: { id: 'thread-1', agent: 'claude', workspace: 'uni-agent' },
       mode: 'auto_edit',
+      model: null,
       events: [
         { event: expect.objectContaining({ type: 'session_started' }), at: expect.any(Number) },
         { event: expect.objectContaining({ type: 'turn_started' }), at: expect.any(Number) },

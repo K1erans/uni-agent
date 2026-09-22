@@ -84,6 +84,20 @@ describe('CodexAdapter', () => {
     expect(setup.errors()).toEqual([]);
   });
 
+  it('uses a newly selected model on the next turn', async () => {
+    const setup = setupAdapter(CodexAdapter.make, [[
+      ...handshake(), ...turnStart(4, 'one'), turnCompleted('completed'),
+      request(5, 'turn/start', {
+        threadId: THREAD, input: [{ type: 'text', text: 'two', text_elements: [] }], ...AUTO_EDIT, model: 'gpt-6-astra',
+      }),
+      result(5, { turn: { id: TURN } }), turnCompleted('completed'),
+    ]]);
+    expect(await setup.prompt('one')).toBe('end_turn');
+    await Effect.runPromise(setup.adapter.setModel('gpt-6-astra'));
+    expect(await setup.prompt('two')).toBe('end_turn');
+    expect(setup.errors()).toEqual([]);
+  });
+
   it('streams agent message and reasoning deltas, and shows completed items that never streamed', async () => {
     const { chunks, errors, prompt } = setupAdapter(CodexAdapter.make, [
       [

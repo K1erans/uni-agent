@@ -1,8 +1,8 @@
 import { Schema } from 'effect';
 import { useRef, type ReactNode } from 'react';
-import { Mode } from '../../src/agents/events';
+import { AgentKind, Mode, type ModelInfo } from '../../src/agents/events';
 import { ArrowUpIcon, BranchIcon, ChevronDownIcon, FolderIcon } from './icons';
-import { MODE_DESCRIPTIONS, MODE_NAMES, permissionLabel } from './labels';
+import { AGENT_NAMES, MODE_DESCRIPTIONS, MODE_NAMES, permissionLabel } from './labels';
 import type { SessionConfig } from './threadState';
 
 interface ComposerProps {
@@ -13,6 +13,14 @@ interface ComposerProps {
   onSend: () => void;
   canSend: boolean;
   agentName: string;
+  agent: AgentKind | undefined;
+  agentLocked: boolean;
+  onAgentChange: (agent: AgentKind) => void;
+  selectedModel: string | null;
+  models: ReadonlyArray<ModelInfo> | undefined;
+  modelError: string | null;
+  onModelChange: (model: string | null) => void;
+  modelBusy: boolean;
   mode: Mode;
   /** Asks the extension to switch the thread's mode; undefined while no thread is shown. */
   onModeChange: ((mode: Mode) => void) | undefined;
@@ -26,7 +34,7 @@ interface ComposerProps {
  * what the agent really runs with; only the mode can be changed from here so far, and the others
  * are disabled.
  */
-export function Composer({ draft, rejection, onDraftChange, onSend, canSend, agentName, mode, onModeChange, config, workspace, branch }: ComposerProps) {
+export function Composer({ draft, rejection, onDraftChange, onSend, canSend, agentName, agent, agentLocked, onAgentChange, selectedModel, models, modelError, onModelChange, modelBusy, mode, onModeChange, config, workspace, branch }: ComposerProps) {
   const input = useRef<HTMLTextAreaElement>(null);
   const send = () => {
     if (canSend) {
@@ -67,7 +75,25 @@ export function Composer({ draft, rejection, onDraftChange, onSend, canSend, age
           </button>
         </div>
         <div className="control-row control-row-session" role="group" aria-label="Session settings">
-          <SettingControl name="Model" value={config?.model ?? 'Default model'} className="control-model" />
+          <label className="control control-agent" title={agentLocked ? 'This thread is locked to its agent.' : 'Choose an agent for this thread.'}>
+            <select className="control-select" aria-label="Agent" value={agent ?? 'claude'} disabled={!agent || agentLocked} onChange={(event) => {
+              if (Schema.is(AgentKind)(event.target.value)) {
+                onAgentChange(event.target.value);
+              }
+            }}>
+              {AgentKind.literals.map((kind) => <option key={kind} value={kind}>{AGENT_NAMES[kind]}</option>)}
+            </select>
+            <span className="control-value" aria-hidden="true">{agent ? AGENT_NAMES[agent] : 'Agent'}</span>
+            {!agentLocked && <ChevronDownIcon size={10} className="control-chevron" />}
+          </label>
+          <label className="control control-model" title="Changing models between prompts resets the prompt cache.">
+            <select className="control-select" aria-label="Model" aria-describedby="model-hint" value={selectedModel ?? ''} disabled={!agent || !!modelError || models === undefined || modelBusy} onChange={(event) => onModelChange(event.target.value || null)}>
+              <option value="">Default model</option>
+              {models?.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
+            </select>
+            <span className="control-value" aria-hidden="true">{selectedModel ? models?.find((model) => model.id === selectedModel)?.name ?? selectedModel : models === undefined && !modelError ? 'Loading models…' : 'Default model'}</span>
+            <ChevronDownIcon size={10} className="control-chevron" />
+          </label>
           <span className="spacer" />
           <SettingControl name="Reasoning" value="Default" />
           <span className="control-separator" aria-hidden="true" />
@@ -79,6 +105,9 @@ export function Composer({ draft, rejection, onDraftChange, onSend, canSend, age
           {branch !== null && <SettingControl name="Branch" value={branch} icon={<BranchIcon size={12} />} />}
         </div>
       </div>
+      <p id="model-hint" className={modelError ? 'composer-hint composer-rejection' : 'composer-hint'} role={modelError ? 'alert' : undefined}>
+        {modelError ? `Could not load models: ${modelError}. Using the agent's default model.` : 'Changing models between prompts resets the prompt cache.'}
+      </p>
       <p id="composer-hint" className={rejection ? 'composer-hint composer-rejection' : 'composer-hint'} role={rejection ? 'alert' : undefined}>
         {rejection ?? 'Enter to send · Shift + Enter for a new line'}
       </p>

@@ -1,5 +1,5 @@
 import { Schema } from 'effect';
-import { AgentEvent, AgentKind, Mode } from './agents/events';
+import { AgentEvent, AgentKind, Mode, ModelInfo } from './agents/events';
 
 /** Messages the sidebar webview posts to the extension. Shared by both bundles. */
 export const WebviewMessage = Schema.Union(
@@ -10,7 +10,10 @@ export const WebviewMessage = Schema.Union(
   // The user's answer to a permission request: the ID of the option they chose.
   Schema.Struct({ type: Schema.Literal('permission_response'), threadId: Schema.String, requestId: Schema.String, optionId: Schema.String }),
   // The mode the user picked for a thread. Full auto is only applied once the workspace has opted in.
-  Schema.Struct({ type: Schema.Literal('set_mode'), threadId: Schema.String, mode: Mode })
+  Schema.Struct({ type: Schema.Literal('set_mode'), threadId: Schema.String, mode: Mode }),
+  Schema.Struct({ type: Schema.Literal('set_agent'), threadId: Schema.String, agent: AgentKind }),
+  Schema.Struct({ type: Schema.Literal('set_model'), threadId: Schema.String, agent: AgentKind, model: Schema.NullOr(Schema.String) }),
+  Schema.Struct({ type: Schema.Literal('get_models'), threadId: Schema.String, agent: AgentKind })
 );
 export type WebviewMessage = typeof WebviewMessage.Type;
 
@@ -30,11 +33,13 @@ export type ThreadInfo = typeof ThreadInfo.Type;
 export const PromptRejection = Schema.Literal('busy', 'stale', 'empty', 'unknown');
 export type PromptRejection = typeof PromptRejection.Type;
 
+export const ModelDiscoveryFailure = Schema.Struct({ _tag: Schema.Literal('ModelDiscoveryFailed'), message: Schema.String });
+
 /** Messages the extension posts to the sidebar webview. */
 export const ExtensionMessage = Schema.Union(
   // The thread to show and everything it has seen so far; replaces the webview's state. Sent on
   // every `ready` and whenever the sidebar switches thread.
-  Schema.Struct({ type: Schema.Literal('history'), thread: ThreadInfo, mode: Mode, events: Schema.Array(ThreadEvent) }),
+  Schema.Struct({ type: Schema.Literal('history'), thread: ThreadInfo, mode: Mode, model: Schema.NullOr(Schema.String), events: Schema.Array(ThreadEvent) }),
   Schema.Struct({ type: Schema.Literal('event'), threadId: Schema.String, ...ThreadEvent.fields }),
   Schema.Union(
     Schema.Struct({ type: Schema.Literal('prompt_result'), threadId: Schema.String, submissionId: Schema.String, status: Schema.Literal('accepted') }),
@@ -42,6 +47,11 @@ export const ExtensionMessage = Schema.Union(
   ),
   // The thread's mode changed.
   Schema.Struct({ type: Schema.Literal('mode'), threadId: Schema.String, mode: Mode }),
+  Schema.Struct({ type: Schema.Literal('model'), threadId: Schema.String, model: Schema.NullOr(Schema.String) }),
+  Schema.Union(
+    Schema.Struct({ type: Schema.Literal('models'), threadId: Schema.String, agent: AgentKind, models: Schema.Array(ModelInfo), error: Schema.Null }),
+    Schema.Struct({ type: Schema.Literal('models'), threadId: Schema.String, agent: AgentKind, models: Schema.Array(ModelInfo), error: ModelDiscoveryFailure })
+  ),
   // The checked-out branch of the shown thread's workspace; null when unknown or detached.
   Schema.Struct({ type: Schema.Literal('branch'), name: Schema.NullOr(Schema.String) })
 );

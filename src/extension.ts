@@ -6,6 +6,7 @@ import type { MakeAdapter } from './agents/adapter';
 import { ClaudeSdk } from './agents/claude/claudeAdapter';
 import { AGENT_NAMES, AgentKind } from './agents/events';
 import { makeAgentAdapter } from './agents/factory';
+import { ModelCatalog } from './agents/modelCatalog';
 import { Executables } from './agents/findExecutable';
 import type { ModeSettings } from './agents/modes';
 import { Stdio } from './agents/stdio';
@@ -55,6 +56,7 @@ function start(context: vscode.ExtensionContext): Effect.Effect<UniAgentApi | un
         ClaudeSdk.live,
         Stdio.live,
         Executables.live,
+        ModelCatalog.live.pipe(Layer.provide(Layer.mergeAll(ClaudeSdk.live, Stdio.live, Executables.live))),
         Ids.live,
         gitBranchesLive,
         GitRunner.live,
@@ -126,7 +128,7 @@ function startServices(
   });
 }
 
-type Services = ClaudeSdk | Stdio | Executables | Ids | Branches | ModeSettings | FullAutoOptIn | GitRunner;
+type Services = ClaudeSdk | Stdio | Executables | ModelCatalog | Ids | Branches | ModeSettings | FullAutoOptIn | GitRunner;
 
 const revealSidebar = Effect.promise(async () => vscode.commands.executeCommand(`${SIDEBAR_VIEW_ID}.focus`));
 

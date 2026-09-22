@@ -2,6 +2,8 @@ import * as crypto from 'node:crypto';
 import { Effect, ExecutionStrategy, Exit, Option, Runtime, Schema, Scope } from 'effect';
 import * as vscode from 'vscode';
 import { disposable } from './disposable';
+import { ModelCatalog } from './agents/modelCatalog';
+import { readSetting } from './settings';
 import { FullAutoOptIn } from './fullAutoOptIn';
 import { WebviewMessage } from './protocol';
 import type { Post } from './thread';
@@ -21,10 +23,11 @@ export function registerSidebar(
   extensionUri: vscode.Uri,
   threads: Threads,
   onReady: (view: vscode.WebviewView) => void
-): Effect.Effect<void, never, FullAutoOptIn | Scope.Scope> {
+): Effect.Effect<void, never, FullAutoOptIn | ModelCatalog | Scope.Scope> {
   return Effect.gen(function* () {
     const scope = yield* Effect.scope;
-    const run = Runtime.runFork(yield* Effect.runtime<FullAutoOptIn>());
+    const run = Runtime.runFork(yield* Effect.runtime<FullAutoOptIn | ModelCatalog>());
+    const catalog = yield* ModelCatalog;
     const webviewRoot = vscode.Uri.joinPath(extensionUri, 'dist', 'webview');
 
     /** Wires one webview up; everything it acquires lives until VS Code disposes the view. */
@@ -45,6 +48,24 @@ export function registerSidebar(
               return threads.respond(message.threadId, message.requestId, message.optionId);
             case 'set_mode':
               return Effect.zipRight(message.mode === 'full_auto' ? confirmFullAuto : Effect.void, threads.setMode(message.threadId, message.mode));
+            case 'set_agent':
+              return threads.setAgent(message.threadId, message.agent);
+            case 'set_model':
+              return threads.current?.info.id === message.threadId && threads.current.info.agent === message.agent
+                ? threads.setModel(message.threadId, message.model ?? undefined)
+                : Effect.void;
+            case 'get_models': {
+              const thread = threads.current;
+              if (!thread || thread.info.id !== message.threadId || thread.info.agent !== message.agent) {
+                return Effect.void;
+              }
+              const executablePath = readSetting(`${message.agent}.executablePath`, Schema.NonEmptyString);
+              return Effect.flatMap(Effect.either(catalog.list(message.agent, thread.workspace.cwd, executablePath)), (result) =>
+                post(result._tag === 'Right'
+                  ? { type: 'models', threadId: message.threadId, agent: message.agent, models: [...result.right], error: null }
+                  : { type: 'models', threadId: message.threadId, agent: message.agent, models: [], error: { _tag: 'ModelDiscoveryFailed', message: result.left.message } })
+              );
+            }
             case 'copy':
               return Effect.tryPromise(async () => vscode.env.clipboard.writeText(message.text)).pipe(
                 Effect.catchAll((error) => Effect.logWarning('Could not copy to the clipboard', error))

@@ -69,6 +69,8 @@ export function recordingQuery(query: ClaudeQueryFn, recorder: TrafficRecorder<S
       [Symbol.asyncIterator]: () => Stream.toAsyncIterable(replies)[Symbol.asyncIterator](),
       interrupt: () => inner.interrupt(),
       setPermissionMode: (mode) => inner.setPermissionMode(mode),
+      setModel: (model) => inner.setModel(model),
+      supportedModels: () => inner.supportedModels(),
       close: () => inner.close(),
     };
   };
@@ -129,6 +131,8 @@ export function replayQuery(lines: readonly TrafficLine[]): ClaudeQueryFn {
       [Symbol.asyncIterator]: () => replay,
       interrupt: async () => undefined,
       setPermissionMode: async () => undefined,
+      setModel: async () => undefined,
+      supportedModels: async () => [],
       close: () => void replay.return?.(),
     };
   };
