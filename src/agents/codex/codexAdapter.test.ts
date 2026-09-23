@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { modeSettings } from '../../testing/modeSettings';
 import { agentRequest, answer, exit, methodNotFound, notification, notify, request, result, rpcError, setupAdapter } from '../../testing/stdioFixtures';
 import { TurnInProgress } from '../adapter';
-import { CLIENT_INFO } from '../jsonRpcAdapter';
+import { CLIENT_INFO } from '../jsonRpcSession';
 import type { TrafficLine, WireMessage } from '../traffic';
 import { CodexAdapter } from './codexAdapter';
 

@@ -46,14 +46,18 @@ Press <kbd>F5</kbd> to launch an Extension Development Host with Uni Agent loade
 | Effect services: agent SDK, stdio processes, executable lookup, IDs; VS Code disposables in a scope; typed settings | `src/agents/claude/claudeAdapter.ts`, `src/agents/stdio.ts`, `src/agents/findExecutable.ts`, `src/ids.ts`, `src/disposable.ts`, `src/settings.ts` |
 | Sidebar webview view (host, CSP) | `src/sidebar.ts` |
 | Webview ↔ extension message schemas, decoded on both sides | `src/protocol.ts` |
-| Thread: one scoped adapter, its timestamped event history, replayed to the webview on load | `src/thread.ts` |
-| The window's threads, which one the sidebar shows, and its branch | `src/threads.ts` |
+| Thread: one scoped adapter, its timestamped event history, replayed to the webview on load, and the record it keeps itself in | `src/thread.ts` |
+| The window's threads, the only way in to one: summaries out, actions by ID, which one the sidebar shows, and its branch | `src/threads.ts` |
+| The transcript fold (turns, tool calls, approvals, status), shared by the extension and the webview | `src/transcript.ts` |
+| Thread storage: SQLite in workspace storage, and the compaction of events into finished items | `src/database.ts`, `src/threadStore.ts`, `src/compaction.ts` |
+| Worktrees: a thread's isolated checkout, from creation to removal | `src/worktrees.ts` |
 | Current git branch, from VS Code's built-in Git extension | `src/branches.ts`, `src/git.ts` |
 | Normalised, ACP-shaped event model (Effect schemas) and adapter interface | `src/agents/events.ts`, `src/agents/adapter.ts` |
-| What every adapter shares: one turn at a time, binary lookup, crashes, stopping with the scope | `src/agents/baseAdapter.ts`, `src/agents/turn.ts` |
-| Claude adapter (Claude Agent SDK over the user's `claude` binary) | `src/agents/claude/` |
-| JSON-RPC over stdio, and the adapter base for agents that speak it | `src/agents/jsonRpc.ts`, `src/agents/jsonRpcAdapter.ts` |
-| Codex adapter (`codex app-server`) and Cursor adapter (ACP, `agent acp`) | `src/agents/codex/`, `src/agents/cursor/` |
+| The session driver every agent runs in: one turn at a time, binary lookup, approvals, mode and model changes, crashes, stopping with the scope; agents plug in a handler | `src/agents/session.ts`, `src/agents/turn.ts` |
+| Claude handler (Claude Agent SDK over the user's `claude` binary) | `src/agents/claude/` |
+| JSON-RPC over stdio, and the connection handlers of agents that speak it compose | `src/agents/jsonRpc.ts`, `src/agents/jsonRpcSession.ts` |
+| Codex handler (`codex app-server`) and Cursor handler (ACP, `agent acp`) | `src/agents/codex/`, `src/agents/cursor/` |
+| Each agent's protocol beyond one session (command, handshake, models), shared by its handler and model discovery | `src/agents/*/…Protocol.ts`, `src/agents/modelCatalog.ts` |
 | NDJSON traffic record/replay | `src/agents/traffic.ts`, `src/agents/claude/claudeTraffic.ts`, `src/agents/stdioTraffic.ts` |
 | Sidebar chat UI (React, VS Code theme variables) | `webview/src/` |
 | Effect logger that writes to the output channel | `src/logger.ts` |

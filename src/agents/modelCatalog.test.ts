@@ -6,7 +6,7 @@ import { replayStdio } from './stdioTraffic';
 import { replayQuery } from './claude/claudeTraffic';
 import { ClaudeSdk } from './claude/claudeAdapter';
 import { Executables } from './findExecutable';
-import { CLIENT_INFO } from './jsonRpcAdapter';
+import { CLIENT_INFO } from './jsonRpcSession';
 import { ModelCatalog } from './modelCatalog';
 import { Stdio } from './stdio';
 

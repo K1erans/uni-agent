@@ -1,6 +1,6 @@
 import { Effect, Option, Schema, Stream } from 'effect';
 import type { ConnectionClosed, JsonRpcConnection, RpcError } from '../jsonRpc';
-import { CLIENT_INFO } from '../jsonRpcAdapter';
+import { CLIENT_INFO } from '../jsonRpcSession';
 import { WireMessage } from '../traffic';
 
 /**
