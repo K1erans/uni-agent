@@ -1,6 +1,6 @@
-import { Clock, Data, Effect, Fiber, Scope } from 'effect';
+import { Clock, Effect, Scope } from 'effect';
 import { RESUME_FAILED, type AgentAdapter, type EventSink, type MakeAdapter } from './agents/adapter';
-import { AGENT_NAMES, DEFAULT_MODE, MODE_NAMES, type AgentEvent, type AgentKind, type Mode, type StopReason } from './agents/events';
+import { AGENT_NAMES, DEFAULT_MODE, MODE_NAMES, type AgentEvent, type AgentKind, type Mode } from './agents/events';
 import { threadTitle, type ExtensionMessage, type ThreadEvent, type ThreadInfo } from './protocol';
 import type { StoredHistory } from './threadStore';
 
@@ -14,23 +14,10 @@ export interface Workspace {
 /** Delivers a message to the connected webview. */
 export type Post = (message: ExtensionMessage) => Effect.Effect<void>;
 
-export class PromptRejected extends Data.TaggedError('PromptRejected')<{ readonly reason: PromptRefusal }> {}
-
 /** Why a thread refused a prompt. */
 export type PromptRefusal = 'busy' | 'empty' | 'read_only';
 
-export interface TurnResult {
-  readonly agent: AgentKind;
-  readonly model: string | undefined;
-  readonly sessionId: string | undefined;
-  readonly stopReason: StopReason;
-  readonly response: string;
-  readonly events: ReadonlyArray<AgentEvent>;
-}
-
-export type PromptAdmission =
-  | { readonly status: 'accepted'; readonly completion: Effect.Effect<TurnResult> }
-  | { readonly status: 'rejected'; readonly reason: PromptRefusal };
+export type PromptAdmission = { readonly status: 'accepted' } | { readonly status: 'rejected'; readonly reason: PromptRefusal };
 
 /** How a thread is doing, for lists of threads. */
 export type ThreadStatus = 'running' | 'needs_approval' | 'idle' | 'read_only';
@@ -77,7 +64,6 @@ export interface ThreadOptions {
    * (the thread list, the sidebar's badge) can catch up with, for example, a thread waiting for approval.
    */
   readonly onChanged?: () => Effect.Effect<void>;
-  readonly onEvent?: EventSink;
   readonly model?: string;
   /** The mode the thread starts in; {@link DEFAULT_MODE} if left out. */
   readonly mode?: Mode;
@@ -112,8 +98,6 @@ export interface Thread {
   detach(): Effect.Effect<void>;
   /** Reserves a turn immediately and reports whether the prompt was admitted. */
   prompt(text: string): Effect.Effect<PromptAdmission>;
-  /** Reserves a turn and waits for its reviewable result. */
-  run(text: string): Effect.Effect<TurnResult, PromptRejected>;
   /** Stops the running turn. */
   cancel(): Effect.Effect<void>;
   /** Answers a permission request the agent is waiting on; an answer it cannot place is logged and dropped. */
@@ -156,7 +140,7 @@ export function makeThread<R>(
   return Effect.gen(function* () {
     const scope = yield* Effect.scope;
     const context = yield* Effect.context<R>();
-    const { onChanged = () => Effect.void, onEvent = () => Effect.void, journal = NO_JOURNAL, restored } = options;
+    const { onChanged = () => Effect.void, journal = NO_JOURNAL, restored } = options;
     const history: ThreadEvent[] = [];
     let post: Post | undefined;
     let adapter: AgentAdapter | undefined;
@@ -165,8 +149,6 @@ export function makeThread<R>(
     let title = restored?.title;
     let mode = options.mode ?? DEFAULT_MODE;
     let sessionId = restored?.sessionId;
-    let configuredModel: string | undefined;
-    let defaultReportedModel: string | undefined;
     let selectedModel = options.model;
     let readOnly = restored?.readOnly;
     // Mode changes arrive on fibers of their own; one at a time keeps the mode shown in step with
@@ -186,9 +168,6 @@ export function makeThread<R>(
       Effect.flatMap(Clock.currentTimeMillis, (at) => {
         if (event.type === 'session_started') {
           sessionId = event.sessionId;
-        } else if (event.type === 'session_configured') {
-          configuredModel = event.model;
-          defaultReportedModel ??= event.model;
         }
         if (event.type === 'turn_started' && title === undefined) {
           title = threadTitle(event.prompt.map((block) => block.text).join('\n'));
@@ -199,7 +178,6 @@ export function makeThread<R>(
             journal.record(event, at),
             post ? post({ type: 'event', threadId: id, event, at }) : Effect.void,
             onChanged(),
-            onEvent(event),
             event.type === 'error' && event.code === 'resume_failed' ? becomeReadOnly(RESUME_FAILED) : Effect.void,
           ],
           { discard: true }
@@ -230,7 +208,7 @@ export function makeThread<R>(
     // History is loaded before a prompt is admitted: loading can find it unreadable, which makes
     // the thread read-only, and a prompt admitted before then would still reach the agent.
     const prompt = (text: string): Effect.Effect<PromptAdmission> =>
-      Effect.zipRight(loaded, Effect.suspend(() => {
+      Effect.zipRight(loaded, Effect.suspend((): Effect.Effect<PromptAdmission> => {
         if (!text.trim()) {
           return Effect.succeed({ status: 'rejected' as const, reason: 'empty' as const });
         }
@@ -244,12 +222,9 @@ export function makeThread<R>(
         prompted = true;
         const turn = Effect.gen(function* () {
           const started = yield* adapterFor;
-          const from = history.length;
-          const stopReason = yield* Effect.orDie(started.prompt([{ type: 'text', text }]));
-          const events = history.slice(from).map(({ event }) => event);
-          return { agent, model: configuredModel, sessionId, stopReason, response: replyText(events), events } satisfies TurnResult;
+          yield* Effect.orDie(started.prompt([{ type: 'text', text }]));
         }).pipe(Effect.ensuring(Effect.sync(() => { running = false; })));
-        return Effect.map(Effect.forkIn(turn, scope), (fiber): PromptAdmission => ({ status: 'accepted', completion: Fiber.join(fiber) }));
+        return Effect.as(Effect.forkIn(turn, scope), { status: 'accepted' });
       }));
     const showMode = (next: Mode) =>
       Effect.suspend(() => {
@@ -296,9 +271,6 @@ export function makeThread<R>(
         ),
       detach: () => Effect.sync(() => (post = undefined)),
       prompt,
-      run: (text) => Effect.flatMap(prompt(text), (admission) =>
-        admission.status === 'accepted' ? admission.completion : new PromptRejected({ reason: admission.reason })
-      ),
       cancel: () => Effect.suspend(() => (adapter ? adapter.cancel() : Effect.void)),
       respond: (requestId, optionId) =>
         Effect.suspend(() => {
@@ -340,7 +312,6 @@ export function makeThread<R>(
           }
         }
         selectedModel = next;
-        configuredModel = next ?? defaultReportedModel;
         yield* journal.setModel(next);
         if (post) {
           yield* post({ type: 'model', threadId: id, model: next ?? null });
@@ -348,16 +319,4 @@ export function makeThread<R>(
       }),
     };
   });
-}
-
-/** Groups streamed chunks by native message ID, preserving their first-seen order. */
-function replyText(events: ReadonlyArray<AgentEvent>): string {
-  const messages = new Map<string, string>();
-  for (const event of events) {
-    if (event.type === 'session_update' && event.update.sessionUpdate === 'agent_message_chunk') {
-      const { messageId, content } = event.update;
-      messages.set(messageId, (messages.get(messageId) ?? '') + content.text);
-    }
-  }
-  return [...messages.values()].join('\n');
 }

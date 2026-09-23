@@ -21,20 +21,16 @@ function setup() {
 }
 
 describe('Thread', () => {
-  it('reserves one turn, rejects a busy prompt, and returns its reviewable result', async () => {
+  it('reserves one turn, rejects a busy prompt, and takes the next once the turn ends', async () => {
     const { thread, adapter, prompt } = setup();
     expect(await prompt('   ')).toEqual({ status: 'rejected', reason: 'empty' });
-    const admitted = await prompt('First');
-    expect(admitted.status).toBe('accepted');
+    expect(await prompt('First')).toEqual({ status: 'accepted' });
     expect(await prompt('Second')).toEqual({ status: 'rejected', reason: 'busy' });
+    expect(thread.status).toBe('running');
     await adapter.say('Done.');
     await adapter.endTurn();
-    if (admitted.status !== 'accepted') {
-      throw new Error('Expected an accepted prompt');
-    }
-    expect(await Effect.runPromise(admitted.completion)).toMatchObject({
-      agent: 'claude', sessionId: adapter.sessionId, stopReason: 'end_turn', response: 'Done.',
-    });
+    expect(thread.status).toBe('idle');
+    expect(await prompt('Third')).toEqual({ status: 'accepted' });
     expect(thread.title).toBe('First');
   });
 
