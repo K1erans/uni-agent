@@ -13,13 +13,12 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { Context, type Deferred, Effect, Layer, Option, Queue, Runtime, Schema, type Scope, Stream } from 'effect';
 import { Ids } from '../../ids';
-import { ModeChangeFailed, ModelChangeFailed, notSignedInMessage, resumeFailedMessage, type AdapterOptions } from '../adapter';
-import { BaseAdapter } from '../baseAdapter';
+import { ModeChangeFailed, ModelChangeFailed, notSignedInMessage, resumeFailedMessage, type AdapterOptions, type AgentAdapter, type EventSink } from '../adapter';
 import type { AgentErrorCode, ContentBlock, StopReason, ToolCall, ToolCallStatus } from '../events';
-import { Executables } from '../findExecutable';
-import { ModeSettings } from '../modes';
+import { makeAgentSession, type AgentHandler, type AgentSession, type SessionServices } from '../session';
 import { WireMessage } from '../traffic';
 import { Turn } from '../turn';
+import { CLAUDE_COMMAND } from './claudeProtocol';
 import { ClaudeModeOverrides, claudeNoLooser, claudePermissionMode } from './claudeModes';
 import { describeTool, permissionOptions, ToolResultContent, toolResultContent } from './claudeTools';
 
@@ -129,9 +128,8 @@ class Connection {
  * session Claude no longer has ends the turn with `resume_failed`. The query runs in the adapter's
  * scope, so closing the scope stops it.
  */
-export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
-  readonly agent = 'claude' as const;
-  protected readonly command = 'claude';
+class ClaudeHandler implements AgentHandler<ClaudeTurn> {
+  readonly command = CLAUDE_COMMAND;
 
   private connection: Connection | undefined;
   /** Whether Claude has written the session, so a restart must resume it rather than create it. */
@@ -139,38 +137,23 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
   /** A connection started to resume the session that has not yet heard from Claude. */
   private resuming: Connection | undefined;
 
-  private constructor(
+  constructor(
+    private readonly session: AgentSession<ClaudeTurn>,
     readonly sessionId: string,
-    options: AdapterOptions,
-    private readonly sdk: Context.Tag.Service<ClaudeSdk>,
-    executables: Context.Tag.Service<Executables>,
-    ids: Context.Tag.Service<Ids>,
-    modeSettings: Context.Tag.Service<ModeSettings>,
-    scope: Scope.Scope
+    private readonly sdk: Context.Tag.Service<ClaudeSdk>
   ) {
-    super(options, executables, ids, modeSettings, scope);
-    this.sessionExists = options.resume !== undefined;
+    this.sessionExists = session.options.resume !== undefined;
   }
 
-  static make(options: AdapterOptions): Effect.Effect<ClaudeAdapter, never, ClaudeSdk | Executables | Ids | ModeSettings | Scope.Scope> {
-    return Effect.gen(function* () {
-      const ids = yield* Ids;
-      const adapter = new ClaudeAdapter(options.resume ?? (yield* ids.next), options, yield* ClaudeSdk, yield* Executables, ids, yield* ModeSettings, yield* Effect.scope);
-      yield* adapter.emit({ type: 'session_started', agent: adapter.agent, sessionId: adapter.sessionId });
-      yield* adapter.start();
-      return adapter;
-    });
+  newTurn(id: string, ended: Deferred.Deferred<StopReason>, emit: EventSink): ClaudeTurn {
+    return new ClaudeTurn(id, ended, emit);
   }
 
-  protected newTurn(id: string, ended: Deferred.Deferred<StopReason>): ClaudeTurn {
-    return new ClaudeTurn(id, ended, this.options.onEvent);
-  }
-
-  protected runTurn(turn: ClaudeTurn, executable: string, prompt: ReadonlyArray<ContentBlock>): Effect.Effect<void> {
+  runTurn(turn: ClaudeTurn, executable: string, prompt: ReadonlyArray<ContentBlock>): Effect.Effect<void> {
     return Effect.flatMap(this.connect(executable), (connection) =>
       // A cancel that arrived before Claude started had nothing to interrupt, so the prompt is never sent.
       turn.cancelRequested
-        ? this.endTurn(turn, 'cancelled')
+        ? this.session.endTurn(turn, 'cancelled')
         : connection.send({
             type: 'user',
             message: { role: 'user', content: prompt.map((block) => ({ type: 'text', text: block.text })) },
@@ -180,11 +163,11 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
     );
   }
 
-  protected interrupt(): Effect.Effect<void> {
+  interrupt(): Effect.Effect<void> {
     return this.connection ? this.connection.interrupt() : Effect.void;
   }
 
-  protected stop(): Effect.Effect<void> {
+  stop(): Effect.Effect<void> {
     return Effect.suspend(() => {
       const connection = this.connection;
       this.connection = undefined;
@@ -198,7 +181,7 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
    * the next prompt restarts it. If Claude refuses the switch, it fails, so the thread keeps showing
    * the mode Claude still runs in.
    */
-  protected applyMode(): Effect.Effect<void, ModeChangeFailed> {
+  applyMode(): Effect.Effect<void, ModeChangeFailed> {
     return Effect.gen(this, function* () {
       const permissionMode = yield* this.permissionMode();
       const connection = this.connection;
@@ -208,22 +191,22 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
       if (permissionMode === 'bypassPermissions' && !connection.canBypass) {
         return yield* Effect.logDebug('Claude Code switches to bypassing permissions when it restarts for the next prompt');
       }
-      yield* Effect.mapError(connection.setPermissionMode(permissionMode), (reason) => new ModeChangeFailed({ agent: this.agent, mode: this.mode, reason }));
+      yield* Effect.mapError(connection.setPermissionMode(permissionMode), (reason) => new ModeChangeFailed({ agent: this.session.agent, mode: this.session.mode(), reason }));
     });
   }
 
-  protected applyModel(model: string | undefined): Effect.Effect<void, ModelChangeFailed> {
+  applyModel(model: string | undefined): Effect.Effect<void, ModelChangeFailed> {
     const connection = this.connection;
     return connection
       ? Effect.tryPromise({
           try: () => connection.query.setModel(model),
-          catch: (error) => new ModelChangeFailed({ agent: this.agent, reason: error instanceof Error ? error.message : String(error) }),
+          catch: (error) => new ModelChangeFailed({ agent: this.session.agent, reason: error instanceof Error ? error.message : String(error) }),
         })
       : Effect.void;
   }
 
   private permissionMode(): Effect.Effect<PermissionMode> {
-    return this.native(claudePermissionMode, ClaudeModeOverrides, claudeNoLooser);
+    return this.session.native(claudePermissionMode, ClaudeModeOverrides, claudeNoLooser);
   }
 
   private connect(executable: string): Effect.Effect<Connection> {
@@ -239,7 +222,7 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
       }
       const runtime = yield* Effect.runtime<never>();
       const connectionOptions: Options = {
-        cwd: this.options.cwd,
+        cwd: this.session.options.cwd,
         pathToClaudeCodeExecutable: executable,
         permissionMode,
         // Claude is only started able to bypass permissions when it starts bypassing them.
@@ -250,14 +233,14 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
         systemPrompt: { type: 'preset', preset: 'claude_code' },
         env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: 'uni-agent' },
       };
-      if (this.selectedModel) {
-        connectionOptions.model = this.selectedModel;
+      if (this.session.model()) {
+        connectionOptions.model = this.session.model();
       }
       const connection = yield* Connection.open(this.sdk.query, connectionOptions);
       this.connection = connection;
       this.resuming = this.sessionExists ? connection : undefined;
       yield* Effect.logDebug(`Started Claude Code (${executable}) for session ${this.sessionId}`);
-      yield* Effect.forkIn(this.consume(connection), this.scope);
+      yield* Effect.forkIn(this.consume(connection), this.session.scope);
       return connection;
     });
   }
@@ -270,20 +253,20 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
         Effect.as('the process exited'),
         Effect.merge
       );
-      if (this.disposed || this.connection !== connection) {
+      if (this.session.stopped() || this.connection !== connection) {
         return;
       }
       this.connection = undefined;
       yield* connection.close();
       const stderr = connection.stderr();
-      const turn = this.turn;
+      const turn = this.session.turn();
       // A resume Claude refused would fail the same way every time; a new session is never started instead.
       if (this.resuming === connection && turn && NO_SESSION.test(`${failure}\n${stderr}`)) {
         this.resuming = undefined;
         yield* turn.reportError('resume_failed', resumeFailedMessage('claude', stderr || failure));
-        return yield* this.endTurn(turn, 'error');
+        return yield* this.session.endTurn(turn, 'error');
       }
-      yield* this.crashed(failure + (stderr ? `\n\n${stderr}` : ''));
+      yield* this.session.crashed(failure + (stderr ? `\n\n${stderr}` : ''));
     });
   }
 
@@ -295,7 +278,7 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
     switch (message.type) {
       case 'system':
         return message.subtype === 'init'
-          ? this.emit({ type: 'session_configured', model: message.model, permissionMode: message.permissionMode })
+          ? this.session.emit({ type: 'session_configured', model: message.model, permissionMode: message.permissionMode })
           : Effect.void;
       case 'stream_event':
         return this.handleStreamEvent(message);
@@ -311,7 +294,7 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
   }
 
   private handleStreamEvent({ event, parent_tool_use_id }: SDKPartialAssistantMessage): Effect.Effect<void> {
-    const turn = this.turn;
+    const turn = this.session.turn();
     // Subagent traffic belongs to its tool call, which a later ticket renders.
     if (!turn || parent_tool_use_id !== null) {
       return Effect.void;
@@ -331,7 +314,7 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
   }
 
   private handleAssistant({ message, error, parent_tool_use_id }: SDKAssistantMessage): Effect.Effect<void> {
-    const turn = this.turn;
+    const turn = this.session.turn();
     if (!turn || parent_tool_use_id !== null) {
       return Effect.void;
     }
@@ -363,7 +346,7 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
 
   /** Tool results come back as the user messages Claude writes for itself. */
   private handleUser({ message, parent_tool_use_id }: SDKUserMessage): Effect.Effect<void> {
-    const turn = this.turn;
+    const turn = this.session.turn();
     if (!turn || parent_tool_use_id !== null || !Array.isArray(message.content)) {
       return Effect.void;
     }
@@ -401,14 +384,14 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
 
   private askPermission(toolName: string, input: ToolInput, request: PermissionRequest): Effect.Effect<PermissionResult> {
     return Effect.gen(this, function* () {
-      const turn = this.turn;
+      const turn = this.session.turn();
       if (!turn) {
         return DENIED_OUTSIDE_TURN;
       }
       const toolCall = yield* this.showToolCall(turn, request.toolUseID, toolName, toWire(input), 'pending');
       const suggestions = request.suggestions ?? [];
       const canAlwaysAllow = suggestions.length > 0 && !request.suppressAlwaysAllowRule;
-      const outcome = yield* this.approvals.ask(turn.id, toolCall, permissionOptions(canAlwaysAllow));
+      const outcome = yield* this.session.approvals.ask(turn.id, toolCall, permissionOptions(canAlwaysAllow));
       if (outcome.outcome === 'cancelled') {
         yield* turn.updateToolCall({ toolCallId: toolCall.toolCallId, status: 'failed' });
         return CANCELLED;
@@ -423,18 +406,18 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
   }
 
   private handleResult(result: SDKResultMessage): Effect.Effect<void> {
-    const turn = this.turn;
+    const turn = this.session.turn();
     if (!turn) {
       return Effect.void;
     }
     const stopReason = turn.cancelRequested ? 'cancelled' : stopReasonOf(result);
     if (stopReason !== 'error') {
-      return this.endTurn(turn, stopReason);
+      return this.session.endTurn(turn, stopReason);
     }
     const [detail, status] =
       result.subtype === 'success' ? [result.result, result.api_error_status] : [result.errors.join('\n'), undefined];
     const code = status === 401 ? 'not_signed_in' : 'agent_error';
-    return Effect.zipRight(turn.reportError(code, errorMessage(code, detail)), this.endTurn(turn, 'error'));
+    return Effect.zipRight(turn.reportError(code, errorMessage(code, detail)), this.session.endTurn(turn, 'error'));
   }
 }
 
@@ -470,3 +453,22 @@ function stopReasonOf(result: SDKResultMessage): StopReason {
 function errorMessage(code: AgentErrorCode, detail: string): string {
   return code === 'not_signed_in' ? notSignedInMessage('claude', 'claude', detail) : detail || 'Claude Code reported an error.';
 }
+
+/** A Claude Code session, which names its native session up front. */
+export type ClaudeAdapter = AgentAdapter & { readonly sessionId: string };
+
+/** Claude Code sessions: `make` builds one over the user's own `claude` (see ClaudeHandler). */
+export const ClaudeAdapter = {
+  make: (options: AdapterOptions): Effect.Effect<ClaudeAdapter, never, ClaudeSdk | SessionServices | Scope.Scope> =>
+    Effect.map(
+      makeAgentSession('claude', options, (session: AgentSession<ClaudeTurn>) =>
+        Effect.gen(function* () {
+          const handler = new ClaudeHandler(session, options.resume ?? (yield* (yield* Ids).next), yield* ClaudeSdk);
+          // The session ID is Claude's to be handed, so it is known before the first prompt.
+          yield* session.emit({ type: 'session_started', agent: 'claude', sessionId: handler.sessionId });
+          return handler;
+        })
+      ),
+      (adapter): ClaudeAdapter => ({ ...adapter, sessionId: adapter.handler.sessionId })
+    ),
+};

@@ -1,14 +1,13 @@
-import { Effect, Option, Predicate, Schema, type Deferred, type Scope } from 'effect';
-import { Ids } from '../../ids';
-import { ModelChangeFailed, notSignedInMessage, type AdapterOptions, type ModeChangeFailed } from '../adapter';
+import { Effect, Option, Predicate, Schema, Stream, type Context, type Deferred, type Scope } from 'effect';
+import { ModelChangeFailed, notSignedInMessage, type AdapterOptions, type AgentAdapter, type EventSink, type ModeChangeFailed } from '../adapter';
 import type { AgentErrorCode, ContentBlock, StopReason, ToolCall } from '../events';
-import { Executables } from '../findExecutable';
-import { ModeSettings } from '../modes';
 import { decodeMessage, type JsonRpcConnection, type MalformedMessage } from '../jsonRpc';
-import { AgentFailure, CLIENT_INFO, JsonRpcAdapter, type OpenedSession, type TurnError } from '../jsonRpcAdapter';
+import { AgentFailure, JsonRpcSession, type JsonRpcProtocol, type OpenedSession, type TurnError } from '../jsonRpcSession';
+import { makeAgentSession, type AgentHandler, type AgentSession, type SessionServices } from '../session';
 import { Stdio } from '../stdio';
 import { WireMessage } from '../traffic';
 import { Turn, type ChunkKind } from '../turn';
+import { CODEX_ARGS, CODEX_COMMAND, codexModels, initializeCodex } from './codexProtocol';
 import { CodexModeOverrides, codexNoLooser, codexPolicy, sandboxPolicy } from './codexModes';
 import { AvailableDecisions, CODEX_CANCELLED, codexApproval, ThreadItem, toolCallOf, type CodexApproval, type ItemLifecycle } from './codexItems';
 
@@ -25,11 +24,6 @@ const ThreadOpened = Schema.Struct({
 });
 
 const TurnStarted = Schema.Struct({ turn: Schema.Struct({ id: Schema.String }) });
-
-const DefaultModelPage = Schema.Struct({
-  data: Schema.Array(Schema.Struct({ model: Schema.NonEmptyString, isDefault: Schema.Boolean })),
-  nextCursor: Schema.NullOr(Schema.String),
-});
 
 const TurnFailure = Schema.Struct({
   message: Schema.String,
@@ -109,66 +103,74 @@ class CodexTurn extends Turn {
  * deltas become chunks, and a completed item fills in any text that never streamed. Items of
  * other threads, such as sub-agents', are skipped.
  */
-export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
-  readonly agent = 'codex' as const;
-  protected readonly command = 'codex';
-  protected readonly args = ['app-server'];
+class CodexHandler implements AgentHandler<CodexTurn>, JsonRpcProtocol<CodexTurn> {
+  readonly command = CODEX_COMMAND;
+  readonly args = CODEX_ARGS;
   private defaultModel: string | undefined;
   private modelChanged = false;
 
-  static make(options: AdapterOptions): Effect.Effect<CodexAdapter, never, Stdio | Executables | Ids | ModeSettings | Scope.Scope> {
-    return Effect.gen(function* () {
-      const adapter = new CodexAdapter(options, yield* Stdio, yield* Executables, yield* Ids, yield* ModeSettings, yield* Effect.scope);
-      yield* adapter.start();
-      return adapter;
-    });
+  private readonly rpc: JsonRpcSession<CodexTurn>;
+
+  constructor(
+    private readonly session: AgentSession<CodexTurn>,
+    stdio: Context.Tag.Service<Stdio>
+  ) {
+    this.rpc = new JsonRpcSession(session, stdio, this);
   }
 
-  protected newTurn(id: string, ended: Deferred.Deferred<StopReason>): CodexTurn {
-    return new CodexTurn(id, ended, this.options.onEvent);
+  newTurn(id: string, ended: Deferred.Deferred<StopReason>, emit: EventSink): CodexTurn {
+    return new CodexTurn(id, ended, emit);
   }
 
-  protected openSession(rpc: JsonRpcConnection, resume: Option.Option<string>): Effect.Effect<OpenedSession, TurnError> {
+  runTurn(turn: CodexTurn, executable: string, prompt: ReadonlyArray<ContentBlock>): Effect.Effect<void> {
+    return this.rpc.runTurn(turn, executable, prompt);
+  }
+
+  stop(): Effect.Effect<void> {
+    return this.rpc.stop();
+  }
+
+  openSession(rpc: JsonRpcConnection, resume: Option.Option<string>): Effect.Effect<OpenedSession, TurnError> {
     return Effect.gen(this, function* () {
-      yield* rpc.request('initialize', { clientInfo: CLIENT_INFO, capabilities: null }, WireMessage);
-      yield* rpc.notify('initialized');
+      yield* initializeCodex(rpc);
       // Codex retries a signed-out turn for a while before failing it with no sign of why, so ask first.
       const { account, requiresOpenaiAuth } = yield* rpc.request('account/read', {}, AccountRead);
       if (account === null && requiresOpenaiAuth) {
         return yield* new AgentFailure({ code: 'not_signed_in', message: notSignedInMessage('codex', 'codex login') });
       }
+      const selected = this.session.model();
       const { thread, model, approvalPolicy } = yield* Option.match(resume, {
         onNone: () => {
-          if (this.selectedModel) {
-            return rpc.request('thread/start', { cwd: this.options.cwd, model: this.selectedModel }, ThreadOpened);
+          if (selected) {
+            return rpc.request('thread/start', { cwd: this.session.options.cwd, model: selected }, ThreadOpened);
           }
-          return rpc.request('thread/start', { cwd: this.options.cwd }, ThreadOpened);
+          return rpc.request('thread/start', { cwd: this.session.options.cwd }, ThreadOpened);
         },
         onSome: (threadId) => {
           // A resumed thread runs the model Codex stored for it until a turn names another.
-          this.modelChanged ||= this.selectedModel !== undefined;
-          return this.resuming(rpc.request('thread/resume', { threadId }, ThreadOpened));
+          this.modelChanged ||= selected !== undefined;
+          return this.rpc.resuming(rpc.request('thread/resume', { threadId }, ThreadOpened));
         },
       });
-      if (!this.selectedModel) {
+      if (!selected) {
         this.defaultModel ??= model;
       }
       return { sessionId: thread.id, model, permissionMode: Predicate.isString(approvalPolicy) ? approvalPolicy : 'custom' };
     });
   }
 
-  protected sendPrompt(rpc: JsonRpcConnection, threadId: string, turn: CodexTurn, prompt: ReadonlyArray<ContentBlock>): Effect.Effect<void, TurnError> {
+  sendPrompt(rpc: JsonRpcConnection, threadId: string, turn: CodexTurn, prompt: ReadonlyArray<ContentBlock>): Effect.Effect<void, TurnError> {
     return Effect.gen(this, function* () {
       const input = prompt.map((block) => ({ type: 'text', text: block.text, text_elements: [] }));
       // Every turn names its policy, so a mode changed since the last turn applies to this one.
-      const { approvalPolicy, sandbox } = yield* this.native(codexPolicy, CodexModeOverrides, codexNoLooser);
+      const { approvalPolicy, sandbox } = yield* this.session.native(codexPolicy, CodexModeOverrides, codexNoLooser);
       const params = {
         threadId, input, approvalPolicy, sandboxPolicy: sandboxPolicy(sandbox),
       };
-      const wanted = this.selectedModel ?? this.defaultModel;
+      const wanted = this.session.model() ?? this.defaultModel;
       const started = yield* rpc.request('turn/start', this.modelChanged && wanted ? { ...params, model: wanted } : params, TurnStarted);
       if (this.modelChanged && wanted) {
-        yield* this.emit({ type: 'session_configured', model: wanted, permissionMode: approvalPolicy });
+        yield* this.session.emit({ type: 'session_configured', model: wanted, permissionMode: approvalPolicy });
       }
       this.modelChanged = false;
       turn.codexTurnId = started.turn.id;
@@ -180,41 +182,37 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
   }
 
   /** Codex takes its approval policy and sandbox with each turn, so a new mode applies from the next one. */
-  protected applyMode(): Effect.Effect<void, ModeChangeFailed> {
+  applyMode(): Effect.Effect<void, ModeChangeFailed> {
     return Effect.void;
   }
 
-  protected applyModel(model: string | undefined): Effect.Effect<void, ModelChangeFailed> {
+  applyModel(model: string | undefined): Effect.Effect<void, ModelChangeFailed> {
     return Effect.gen(this, function* () {
       if (model === undefined && this.defaultModel === undefined) {
         // A thread started with an explicit model reports that model at thread/start. Ask the
         // catalog for the real default rather than mistaking the initial selection for it.
-        yield* this.withSession((rpc) => Effect.gen(this, function* () {
-          let cursor: string | null = null;
-          do {
-            const page: typeof DefaultModelPage.Type = yield* rpc.request('model/list', cursor ? { cursor } : {}, DefaultModelPage).pipe(
-              Effect.mapError((error) => new ModelChangeFailed({ agent: this.agent, reason: error._tag === 'ConnectionClosed' ? error.reason : error.message }))
-            );
-            const found = page.data.find((item) => item.isDefault);
-            if (found) {
-              this.defaultModel = found.model;
-              return;
-            }
-            cursor = page.nextCursor;
-          } while (cursor);
-          return yield* new ModelChangeFailed({ agent: this.agent, reason: 'Codex did not report a default model.' });
-        }));
+        yield* this.rpc.withSession((rpc) =>
+          codexModels(rpc).pipe(
+            Stream.filter((model) => model.isDefault === true),
+            Stream.runHead,
+            Effect.mapError((error) => new ModelChangeFailed({ agent: this.session.agent, reason: error._tag === 'ConnectionClosed' ? error.reason : error.message })),
+            Effect.flatMap(Option.match({
+              onNone: () => new ModelChangeFailed({ agent: this.session.agent, reason: 'Codex did not report a default model.' }),
+              onSome: (found) => Effect.sync(() => { this.defaultModel = found.model; }),
+            }))
+          )
+        );
       }
       // Codex reads the model from each turn/start, so the next prompt applies this selection.
       this.modelChanged = true;
     });
   }
 
-  protected interrupt(turn: CodexTurn): Effect.Effect<void> {
+  interrupt(turn: CodexTurn): Effect.Effect<void> {
     const turnId = turn.codexTurnId;
     return turnId === undefined
       ? Effect.void
-      : this.withSession((rpc, threadId) =>
+      : this.rpc.withSession((rpc, threadId) =>
           rpc.request('turn/interrupt', { threadId, turnId }, WireMessage).pipe(
             Effect.asVoid,
             Effect.catchAll((error) => Effect.logWarning('Could not interrupt Codex', error))
@@ -222,8 +220,8 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
         );
   }
 
-  protected handleNotification(method: string, params: WireMessage | undefined): Effect.Effect<void, MalformedMessage> {
-    const turn = this.turn;
+  handleNotification(method: string, params: WireMessage | undefined): Effect.Effect<void, MalformedMessage> {
+    const turn = this.session.turn();
     if (!CODEX_NOTIFICATIONS.has(method)) {
       return Effect.logDebug(`Skipped Codex notification ${method}`);
     }
@@ -233,7 +231,7 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
     const decode = <A extends { readonly threadId: string }, I>(schema: Schema.Schema<A, I>, handle: (value: A) => Effect.Effect<void>) =>
       Effect.flatMap(decodeMessage(schema, params, `${method} notification`), (value) =>
         // Sub-agents run in threads of their own, whose items belong to a later ticket.
-        value.threadId === this.sessionId ? handle(value) : Effect.void
+        value.threadId === this.rpc.sessionId ? handle(value) : Effect.void
       );
     switch (method) {
       case 'item/agentMessage/delta':
@@ -262,7 +260,7 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
         return decode(TurnCompleted, ({ turn: { status, error } }) => {
           const stopReason = turn.cancelRequested ? 'cancelled' : stopReasonOf(status);
           const report = stopReason === 'error' && error ? turn.reportError(errorCode(error), errorText(error)) : Effect.void;
-          return Effect.zipRight(report, this.endTurn(turn, stopReason));
+          return Effect.zipRight(report, this.session.endTurn(turn, stopReason));
         });
       default:
         return Effect.void;
@@ -274,7 +272,7 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
    * the user has chosen. The answer is awaited on a fiber of the connection's, so the turn's other
    * traffic keeps flowing while the card waits.
    */
-  protected handleRequest(method: string, params: WireMessage | undefined): Effect.Effect<Option.Option<Effect.Effect<WireMessage>>, MalformedMessage> {
+  handleRequest(method: string, params: WireMessage | undefined): Effect.Effect<Option.Option<Effect.Effect<WireMessage>>, MalformedMessage> {
     switch (method) {
       case COMMAND_APPROVAL:
         return Effect.map(decodeMessage(CommandApproval, params, `${method} request`), (request) =>
@@ -314,14 +312,14 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
   /** Asks the user about `toolCall` and answers Codex with the decision behind the option they chose. */
   private askApproval(toolCall: ToolCall, approval: CodexApproval): Effect.Effect<WireMessage> {
     return Effect.suspend(() => {
-      const turn = this.turn;
+      const turn = this.session.turn();
       if (!turn) {
         return Effect.succeed({ decision: CODEX_CANCELLED });
       }
       return Effect.zipRight(
         // The card and the item Codex started are the same tool call, so the ask updates it.
         turn.toolCall(toolCall),
-        Effect.map(this.approvals.ask(turn.id, toolCall, approval.options), (outcome) => ({
+        Effect.map(this.session.approvals.ask(turn.id, toolCall, approval.options), (outcome) => ({
           decision: (outcome.outcome === 'selected' ? approval.decisions.get(outcome.optionId) : undefined) ?? CODEX_CANCELLED,
         }))
       );
@@ -361,3 +359,9 @@ function errorText(error: typeof TurnFailure.Type): string {
   const detail = error.additionalDetails ? `${error.message}\n\n${error.additionalDetails}` : error.message;
   return errorCode(error) === 'not_signed_in' ? notSignedInMessage('codex', 'codex login', detail) : detail;
 }
+
+/** Codex sessions: `make` builds one over the user's own CLI (see CodexHandler). */
+export const CodexAdapter = {
+  make: (options: AdapterOptions): Effect.Effect<AgentAdapter, never, Stdio | SessionServices | Scope.Scope> =>
+    makeAgentSession('codex', options, (session: AgentSession<CodexTurn>) => Effect.map(Stdio, (stdio) => new CodexHandler(session, stdio))),
+};

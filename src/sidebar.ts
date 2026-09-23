@@ -41,7 +41,7 @@ export function registerSidebar(
             case 'ready':
               return Effect.andThen(threads.connect(post), () => onReady(view));
             case 'prompt':
-              return Effect.flatMap(threads.submitSidebar(post, message.threadId, message.text), (outcome) =>
+              return Effect.flatMap(threads.submit(post, message.threadId, message.text), (outcome) =>
                 post({ type: 'prompt_result', threadId: message.threadId, submissionId: message.submissionId, ...outcome })
               );
             case 'permission_response':
@@ -51,21 +51,19 @@ export function registerSidebar(
             case 'set_agent':
               return threads.setAgent(message.threadId, message.agent);
             case 'set_model':
-              return threads.current?.info.id === message.threadId && threads.current.info.agent === message.agent
-                ? threads.setModel(message.threadId, message.model ?? undefined)
-                : Effect.void;
-            case 'get_models': {
-              const thread = threads.current;
-              if (!thread || thread.info.id !== message.threadId || thread.info.agent !== message.agent) {
-                return Effect.void;
-              }
-              const executablePath = readSetting(`${message.agent}.executablePath`, Schema.NonEmptyString);
-              return Effect.flatMap(Effect.either(catalog.list(message.agent, thread.workspace.cwd, executablePath)), (result) =>
-                post(result._tag === 'Right'
-                  ? { type: 'models', threadId: message.threadId, agent: message.agent, models: [...result.right], error: null }
-                  : { type: 'models', threadId: message.threadId, agent: message.agent, models: [], error: { _tag: 'ModelDiscoveryFailed', message: result.left.message } })
-              );
-            }
+              return threads.setModel(message.threadId, message.agent, message.model ?? undefined);
+            case 'get_models':
+              return Option.match(threads.find(message.threadId, message.agent), {
+                onNone: () => Effect.void,
+                onSome: (thread) => {
+                  const executablePath = readSetting(`${message.agent}.executablePath`, Schema.NonEmptyString);
+                  return Effect.flatMap(Effect.either(catalog.list(message.agent, thread.workspace.cwd, executablePath)), (result) =>
+                    post(result._tag === 'Right'
+                      ? { type: 'models', threadId: message.threadId, agent: message.agent, models: [...result.right], error: null }
+                      : { type: 'models', threadId: message.threadId, agent: message.agent, models: [], error: { _tag: 'ModelDiscoveryFailed', message: result.left.message } })
+                  );
+                },
+              });
             case 'copy':
               return Effect.tryPromise(async () => vscode.env.clipboard.writeText(message.text)).pipe(
                 Effect.catchAll((error) => Effect.logWarning('Could not copy to the clipboard', error))

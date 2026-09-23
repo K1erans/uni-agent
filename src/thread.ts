@@ -1,8 +1,9 @@
-import { Clock, Data, Effect, Fiber, Scope } from 'effect';
+import { Clock, Effect, Scope } from 'effect';
 import { RESUME_FAILED, type AgentAdapter, type EventSink, type MakeAdapter } from './agents/adapter';
-import { AGENT_NAMES, DEFAULT_MODE, MODE_NAMES, type AgentEvent, type AgentKind, type Mode, type StopReason } from './agents/events';
+import { AGENT_NAMES, DEFAULT_MODE, MODE_NAMES, type AgentKind, type Mode } from './agents/events';
+import { Compactor, type CompactedEvent } from './compaction';
 import { threadTitle, type ExtensionMessage, type ThreadEvent, type ThreadInfo } from './protocol';
-import type { StoredHistory } from './threadStore';
+import { applyEvent, awaitingApproval, emptyTranscript, foldTranscript } from './transcript';
 
 /** Where a thread's agent runs. */
 export interface Workspace {
@@ -14,23 +15,10 @@ export interface Workspace {
 /** Delivers a message to the connected webview. */
 export type Post = (message: ExtensionMessage) => Effect.Effect<void>;
 
-export class PromptRejected extends Data.TaggedError('PromptRejected')<{ readonly reason: PromptRefusal }> {}
-
 /** Why a thread refused a prompt. */
 export type PromptRefusal = 'busy' | 'empty' | 'read_only';
 
-export interface TurnResult {
-  readonly agent: AgentKind;
-  readonly model: string | undefined;
-  readonly sessionId: string | undefined;
-  readonly stopReason: StopReason;
-  readonly response: string;
-  readonly events: ReadonlyArray<AgentEvent>;
-}
-
-export type PromptAdmission =
-  | { readonly status: 'accepted'; readonly completion: Effect.Effect<TurnResult> }
-  | { readonly status: 'rejected'; readonly reason: PromptRefusal };
+export type PromptAdmission = { readonly status: 'accepted' } | { readonly status: 'rejected'; readonly reason: PromptRefusal };
 
 /** How a thread is doing, for lists of threads. */
 export type ThreadStatus = 'running' | 'needs_approval' | 'idle' | 'read_only';
@@ -38,25 +26,41 @@ export type ThreadStatus = 'running' | 'needs_approval' | 'idle' | 'read_only';
 /** What a thread says once some of its stored history cannot be read. */
 export const HISTORY_UNREADABLE = 'Some of this thread’s history couldn’t be read, so it is read-only. Start a new thread to go on.';
 
-/**
- * Where a thread keeps what happens to it, so it outlives the window. A journal never fails: what
- * it cannot keep, it logs.
- */
-export interface ThreadJournal {
-  /** Records an event the thread's agent emitted, and when it arrived. */
-  record(event: AgentEvent, at: number): Effect.Effect<void>;
-  setMode(mode: Mode): Effect.Effect<void>;
-  setModel(model: string | undefined): Effect.Effect<void>;
-  markReadOnly(reason: string): Effect.Effect<void>;
+/** What a thread knows about itself that a restored thread starts from; everything but its transcript. */
+export interface ThreadFacts {
+  /** The first prompt's title; undefined until the first prompt. */
+  readonly title: string | undefined;
+  /** The native session to resume; undefined until the agent has opened one. */
+  readonly sessionId: string | undefined;
+  readonly mode: Mode;
+  readonly model: string | undefined;
+  /** Why the thread takes no more prompts, if it does not. */
+  readonly readOnly: string | undefined;
 }
 
-/** A journal that keeps nothing, for threads that are not stored. */
-export const NO_JOURNAL: ThreadJournal = {
-  record: () => Effect.void,
-  setMode: () => Effect.void,
-  setModel: () => Effect.void,
-  markReadOnly: () => Effect.void,
-};
+/**
+ * Where a thread keeps itself, so it outlives the window: its facts, and its transcript as rows
+ * of finished items (see `Compactor`). The thread decides when there is something worth keeping
+ * and calls it then. A record never fails: what it cannot keep, it logs.
+ */
+export interface ThreadRecord {
+  /** Keeps the thread's facts as they now stand; the first call stores the thread. */
+  save(facts: ThreadFacts): Effect.Effect<void>;
+  /** Adds finished transcript rows, in the order they replay; only called once the thread is saved. */
+  append(rows: ReadonlyArray<CompactedEvent>): Effect.Effect<void>;
+}
+
+/** A record that keeps nothing, for threads that are not stored. */
+export const NO_RECORD: ThreadRecord = { save: () => Effect.void, append: () => Effect.void };
+
+/** A stored thread's transcript, in the order it happened. */
+export interface StoredHistory {
+  readonly events: ReadonlyArray<ThreadEvent>;
+  /** False if some rows could not be read; they are left out of `events`. */
+  readonly complete: boolean;
+  /** The first row position not yet used, where the thread's next rows go. */
+  readonly nextSeq: number;
+}
 
 /**
  * A stored thread brought back after a reload. Its history is loaded when it is first shown or
@@ -77,24 +81,29 @@ export interface ThreadOptions {
    * (the thread list, the sidebar's badge) can catch up with, for example, a thread waiting for approval.
    */
   readonly onChanged?: () => Effect.Effect<void>;
-  readonly onEvent?: EventSink;
   readonly model?: string;
   /** The mode the thread starts in; {@link DEFAULT_MODE} if left out. */
   readonly mode?: Mode;
-  readonly journal?: ThreadJournal;
+  readonly record?: ThreadRecord;
+  /**
+   * Whether the thread has something to keep before its first prompt (a worktree thread's
+   * checkout), so it is saved at once rather than when its first prompt is admitted.
+   */
+  readonly keep?: boolean;
   readonly restored?: RestoredThread;
 }
 
 /**
  * One conversation with one agent. Keeps every event the adapter emits, stamped with when it
  * arrived, so a webview that (re)loads or switches to this thread is brought up to date by
- * replaying them, and hands them to its journal to be stored. The thread and its adapter live in
- * the scope that makes them; closing it stops the agent.
+ * replaying them. From its first prompt it keeps itself in its record: its facts whenever they
+ * change, and each transcript item once it has finished. The thread and its adapter live in the
+ * scope that makes them; closing it stops the agent.
  */
 export interface Thread {
   readonly info: ThreadInfo;
   readonly workspace: Workspace;
-  /** The first prompt's title; undefined until the first turn starts. */
+  /** The first prompt's title; undefined until the first prompt. */
   readonly title: string | undefined;
   /** Whether no prompt has been sent yet. */
   readonly isEmpty: boolean;
@@ -112,8 +121,6 @@ export interface Thread {
   detach(): Effect.Effect<void>;
   /** Reserves a turn immediately and reports whether the prompt was admitted. */
   prompt(text: string): Effect.Effect<PromptAdmission>;
-  /** Reserves a turn and waits for its reviewable result. */
-  run(text: string): Effect.Effect<TurnResult, PromptRejected>;
   /** Stops the running turn. */
   cancel(): Effect.Effect<void>;
   /** Answers a permission request the agent is waiting on; an answer it cannot place is logged and dropped. */
@@ -125,22 +132,6 @@ export interface Thread {
   setMode(mode: Mode): Effect.Effect<void>;
   /** Changes the selected model between prompts, keeping the provider and session. */
   setModel(model: string | undefined): Effect.Effect<void>;
-}
-
-/**
- * The permission requests a thread's events leave open: those announced and not resolved since.
- * Adapters resolve every request before their turn ends, so this is empty between turns.
- */
-export function openApprovals(events: ReadonlyArray<ThreadEvent>): ReadonlySet<string> {
-  const open = new Set<string>();
-  for (const { event } of events) {
-    if (event.type === 'permission_request') {
-      open.add(event.requestId);
-    } else if (event.type === 'permission_resolved') {
-      open.delete(event.requestId);
-    }
-  }
-  return open;
 }
 
 /**
@@ -156,8 +147,10 @@ export function makeThread<R>(
   return Effect.gen(function* () {
     const scope = yield* Effect.scope;
     const context = yield* Effect.context<R>();
-    const { onChanged = () => Effect.void, onEvent = () => Effect.void, journal = NO_JOURNAL, restored } = options;
+    const { onChanged = () => Effect.void, record = NO_RECORD, restored } = options;
     const history: ThreadEvent[] = [];
+    // The same fold the webview renders, kept up to date so the thread's status is read, not rescanned.
+    let transcript = emptyTranscript;
     let post: Post | undefined;
     let adapter: AgentAdapter | undefined;
     let running = false;
@@ -165,13 +158,21 @@ export function makeThread<R>(
     let title = restored?.title;
     let mode = options.mode ?? DEFAULT_MODE;
     let sessionId = restored?.sessionId;
-    let configuredModel: string | undefined;
-    let defaultReportedModel: string | undefined;
     let selectedModel = options.model;
     let readOnly = restored?.readOnly;
+    // Whether the thread is in its record: from its first prompt, or from the start if it has
+    // something to keep already. A restored thread is stored by definition.
+    let stored = restored !== undefined;
+    // Turns live events into rows of finished items; a restored thread's starts after its stored rows.
+    let compactor = restored ? undefined : new Compactor(0);
     // Mode changes arrive on fibers of their own; one at a time keeps the mode shown in step with
     // the one the agent runs in.
     const modeLock = yield* Effect.makeSemaphore(1);
+
+    /** Saves the thread's facts, once it is stored. */
+    const save = Effect.suspend(() =>
+      stored ? record.save({ title, sessionId, mode, model: selectedModel, readOnly }) : Effect.void
+    );
 
     const becomeReadOnly = (reason: string) =>
       Effect.suspend(() => {
@@ -179,27 +180,24 @@ export function makeThread<R>(
           return Effect.void;
         }
         readOnly = reason;
-        return Effect.all([journal.markReadOnly(reason), post ? post({ type: 'read_only', threadId: id, reason }) : Effect.void, onChanged()], { discard: true });
+        return Effect.all([save, post ? post({ type: 'read_only', threadId: id, reason }) : Effect.void, onChanged()], { discard: true });
       });
 
     const sink: EventSink = (event) =>
       Effect.flatMap(Clock.currentTimeMillis, (at) => {
+        const sessionOpened = event.type === 'session_started' && event.sessionId !== sessionId;
         if (event.type === 'session_started') {
           sessionId = event.sessionId;
-        } else if (event.type === 'session_configured') {
-          configuredModel = event.model;
-          defaultReportedModel ??= event.model;
-        }
-        if (event.type === 'turn_started' && title === undefined) {
-          title = threadTitle(event.prompt.map((block) => block.text).join('\n'));
         }
         history.push({ event, at });
+        transcript = applyEvent(transcript, { event, at });
+        const rows = stored && compactor ? compactor.push(event, at) : [];
         return Effect.all(
           [
-            journal.record(event, at),
+            sessionOpened ? save : Effect.void,
+            rows.length > 0 ? record.append(rows) : Effect.void,
             post ? post({ type: 'event', threadId: id, event, at }) : Effect.void,
             onChanged(),
-            onEvent(event),
             event.type === 'error' && event.code === 'resume_failed' ? becomeReadOnly(RESUME_FAILED) : Effect.void,
           ],
           { discard: true }
@@ -218,19 +216,25 @@ export function makeThread<R>(
     // A restored thread's history is read from the store once, before it is first shown or prompted.
     const loaded = yield* Effect.cached(
       restored
-        ? Effect.flatMap(restored.history, ({ events, complete }) => {
+        ? Effect.flatMap(restored.history, ({ events, complete, nextSeq }) => {
             history.splice(0, 0, ...events);
+            transcript = foldTranscript(history);
+            compactor = new Compactor(nextSeq);
             return complete ? Effect.void : becomeReadOnly(HISTORY_UNREADABLE);
           })
         : Effect.void
     );
     const agent = restored ? restored.agent : (yield* adapterFor).agent;
+    if (options.keep) {
+      stored = true;
+      yield* save;
+    }
 
     const info: ThreadInfo = { id, agent, workspace: workspace.name };
     // History is loaded before a prompt is admitted: loading can find it unreadable, which makes
     // the thread read-only, and a prompt admitted before then would still reach the agent.
     const prompt = (text: string): Effect.Effect<PromptAdmission> =>
-      Effect.zipRight(loaded, Effect.suspend(() => {
+      Effect.zipRight(loaded, Effect.suspend((): Effect.Effect<PromptAdmission> => {
         if (!text.trim()) {
           return Effect.succeed({ status: 'rejected' as const, reason: 'empty' as const });
         }
@@ -242,19 +246,19 @@ export function makeThread<R>(
         }
         running = true;
         prompted = true;
+        title ??= threadTitle(text);
+        stored = true;
         const turn = Effect.gen(function* () {
           const started = yield* adapterFor;
-          const from = history.length;
-          const stopReason = yield* Effect.orDie(started.prompt([{ type: 'text', text }]));
-          const events = history.slice(from).map(({ event }) => event);
-          return { agent, model: configuredModel, sessionId, stopReason, response: replyText(events), events } satisfies TurnResult;
+          yield* Effect.orDie(started.prompt([{ type: 'text', text }]));
         }).pipe(Effect.ensuring(Effect.sync(() => { running = false; })));
-        return Effect.map(Effect.forkIn(turn, scope), (fiber): PromptAdmission => ({ status: 'accepted', completion: Fiber.join(fiber) }));
+        // The thread is saved, with its title and any session already open, before its first row.
+        return Effect.zipRight(save, Effect.as(Effect.forkIn(turn, scope), { status: 'accepted' } as const));
       }));
     const showMode = (next: Mode) =>
       Effect.suspend(() => {
         mode = next;
-        return Effect.zipRight(journal.setMode(next), post ? post({ type: 'mode', threadId: id, mode: next }) : Effect.void);
+        return Effect.zipRight(save, post ? post({ type: 'mode', threadId: id, mode: next }) : Effect.void);
       });
     return {
       info,
@@ -266,10 +270,10 @@ export function makeThread<R>(
         return !prompted;
       },
       get needsApproval() {
-        return openApprovals(history).size > 0;
+        return awaitingApproval(transcript);
       },
       get status(): ThreadStatus {
-        if (openApprovals(history).size > 0) {
+        if (awaitingApproval(transcript)) {
           return 'needs_approval';
         }
         if (running) {
@@ -296,9 +300,6 @@ export function makeThread<R>(
         ),
       detach: () => Effect.sync(() => (post = undefined)),
       prompt,
-      run: (text) => Effect.flatMap(prompt(text), (admission) =>
-        admission.status === 'accepted' ? admission.completion : new PromptRejected({ reason: admission.reason })
-      ),
       cancel: () => Effect.suspend(() => (adapter ? adapter.cancel() : Effect.void)),
       respond: (requestId, optionId) =>
         Effect.suspend(() => {
@@ -340,24 +341,11 @@ export function makeThread<R>(
           }
         }
         selectedModel = next;
-        configuredModel = next ?? defaultReportedModel;
-        yield* journal.setModel(next);
+        yield* save;
         if (post) {
           yield* post({ type: 'model', threadId: id, model: next ?? null });
         }
       }),
     };
   });
-}
-
-/** Groups streamed chunks by native message ID, preserving their first-seen order. */
-function replyText(events: ReadonlyArray<AgentEvent>): string {
-  const messages = new Map<string, string>();
-  for (const event of events) {
-    if (event.type === 'session_update' && event.update.sessionUpdate === 'agent_message_chunk') {
-      const { messageId, content } = event.update;
-      messages.set(messageId, (messages.get(messageId) ?? '') + content.text);
-    }
-  }
-  return [...messages.values()].join('\n');
 }

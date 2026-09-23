@@ -1,57 +1,32 @@
-import { Effect, Option, Schema, type Deferred, type Scope } from 'effect';
-import { Ids } from '../../ids';
-import { ModeChangeFailed, ModelChangeFailed, notSignedInMessage, type AdapterOptions } from '../adapter';
+import { Effect, Option, Schema, type Context, type Deferred, type Scope } from 'effect';
+import { ModeChangeFailed, ModelChangeFailed, notSignedInMessage, type AdapterOptions, type AgentAdapter, type EventSink } from '../adapter';
 import { ContentBlock, MODE_NAMES, PermissionOption, StopReason, ToolCallStatus, ToolKind, type ToolCall, type ToolCallContent } from '../events';
-import { Executables } from '../findExecutable';
-import { ModeSettings } from '../modes';
 import { decodeMessage, type JsonRpcConnection, type MalformedMessage, type RpcError } from '../jsonRpc';
-import { AgentFailure, CLIENT_INFO, JsonRpcAdapter, type OpenedSession, type TurnError } from '../jsonRpcAdapter';
+import { AgentFailure, JsonRpcSession, type JsonRpcProtocol, type OpenedSession, type TurnError } from '../jsonRpcSession';
+import { makeAgentSession, type AgentHandler, type AgentSession, type SessionServices } from '../session';
 import { Stdio } from '../stdio';
 import { WireMessage } from '../traffic';
 import { Turn, type ChunkKind } from '../turn';
+import {
+  AUTH_REQUIRED,
+  ConfigOptionsChanged,
+  CURSOR_ARGS,
+  CURSOR_COMMAND,
+  initializeCursor,
+  modelChoices,
+  modelConfig,
+  SessionCreated,
+  SessionOpened,
+} from './cursorProtocol';
 import { CursorModeOverrides, cursorModeId, cursorNoLooser, cursorSessionMode } from './cursorModes';
 
-// The parts of the Agent Client Protocol (https://agentclientprotocol.com) the adapter reads.
-
-const PROTOCOL_VERSION = 1;
-/** ACP's "authentication required" error code. */
-const AUTH_REQUIRED = -32000;
-
-const Initialized = Schema.Struct({
-  agentCapabilities: Schema.optional(Schema.Struct({ loadSession: Schema.optional(Schema.Boolean) })),
-});
-
-/** The result of `session/new` and `session/load`: the session's model and mode, when the agent has them. */
-const SessionOpened = Schema.Struct({
-  configOptions: Schema.optional(Schema.Array(WireMessage)),
-  models: Schema.optional(
-    Schema.Struct({
-      currentModelId: Schema.String,
-      availableModels: Schema.Array(Schema.Struct({ modelId: Schema.String, name: Schema.String })),
-    })
-  ),
-  modes: Schema.optional(
-    Schema.Struct({ currentModeId: Schema.String, availableModes: Schema.optional(Schema.Array(Schema.Struct({ id: Schema.String }))) })
-  ),
-});
-
-const ModelConfigOption = Schema.Struct({
-  id: Schema.String,
-  category: Schema.optional(Schema.String),
-  type: Schema.Literal('select'),
-  currentValue: Schema.String,
-  options: Schema.Array(Schema.Struct({ value: Schema.String, name: Schema.String })),
-});
-const decodeModelConfigOption = Schema.decodeUnknownOption(ModelConfigOption);
-const ConfigOptionsChanged = Schema.Struct({ configOptions: Schema.Array(WireMessage) });
+// The parts of a session's traffic the adapter reads; the rest of the protocol is in cursorProtocol.ts.
 
 /** The ACP session mode a session runs in, and the ones it offers. */
 interface SessionModes {
   readonly current: string | undefined;
   readonly available: Option.Option<ReadonlyArray<string>>;
 }
-
-const SessionCreated = Schema.Struct({ sessionId: Schema.String, ...SessionOpened.fields });
 
 const PromptResult = Schema.Struct({ stopReason: StopReason });
 
@@ -116,10 +91,9 @@ class CursorTurn extends Turn {
  * The client offers no capabilities yet (file system, terminals), and every request the agent
  * sends, including Cursor's extension methods, is declined with "method not found".
  */
-export class CursorAdapter extends JsonRpcAdapter<CursorTurn> {
-  readonly agent = 'cursor' as const;
-  protected readonly command = 'agent';
-  protected readonly args = ['acp'];
+class CursorHandler implements AgentHandler<CursorTurn>, JsonRpcProtocol<CursorTurn> {
+  readonly command = CURSOR_COMMAND;
+  readonly args = CURSOR_ARGS;
   /** Set while `session/load` replays the session's history, which the thread has already shown. */
   private loading = false;
   /** The session's mode and the modes it offers; the offer is unknown if the agent did not report it. */
@@ -127,37 +101,38 @@ export class CursorAdapter extends JsonRpcAdapter<CursorTurn> {
   private modelConfigId: string | undefined;
   private defaultModelId: string | undefined;
 
-  static make(options: AdapterOptions): Effect.Effect<CursorAdapter, never, Stdio | Executables | Ids | ModeSettings | Scope.Scope> {
-    return Effect.gen(function* () {
-      const adapter = new CursorAdapter(options, yield* Stdio, yield* Executables, yield* Ids, yield* ModeSettings, yield* Effect.scope);
-      yield* adapter.start();
-      return adapter;
-    });
+  private readonly rpc: JsonRpcSession<CursorTurn>;
+
+  constructor(
+    private readonly session: AgentSession<CursorTurn>,
+    stdio: Context.Tag.Service<Stdio>
+  ) {
+    this.rpc = new JsonRpcSession(session, stdio, this);
   }
 
-  protected newTurn(id: string, ended: Deferred.Deferred<StopReason>): CursorTurn {
-    return new CursorTurn(id, ended, this.options.onEvent);
+  newTurn(id: string, ended: Deferred.Deferred<StopReason>, emit: EventSink): CursorTurn {
+    return new CursorTurn(id, ended, emit);
   }
 
-  protected openSession(rpc: JsonRpcConnection, resume: Option.Option<string>): Effect.Effect<OpenedSession, TurnError> {
+  runTurn(turn: CursorTurn, executable: string, prompt: ReadonlyArray<ContentBlock>): Effect.Effect<void> {
+    return this.rpc.runTurn(turn, executable, prompt);
+  }
+
+  stop(): Effect.Effect<void> {
+    return this.rpc.stop();
+  }
+
+  openSession(rpc: JsonRpcConnection, resume: Option.Option<string>): Effect.Effect<OpenedSession, TurnError> {
     return Effect.gen(this, function* () {
-      const { agentCapabilities } = yield* rpc.request(
-        'initialize',
-        {
-          protocolVersion: PROTOCOL_VERSION,
-          clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-          clientInfo: CLIENT_INFO,
-        },
-        Initialized
-      );
-      const session = { cwd: this.options.cwd, mcpServers: [] };
+      const capabilities = yield* initializeCursor(rpc);
+      const session = { cwd: this.session.options.cwd, mcpServers: [] };
       if (Option.isSome(resume)) {
-        if (!agentCapabilities?.loadSession) {
-          return yield* this.resumeFailed('Cursor did not offer to load sessions.');
+        if (!capabilities.loadSession) {
+          return yield* this.rpc.resumeFailed('Cursor did not offer to load sessions.');
         }
         const sessionId = resume.value;
         this.loading = true;
-        const loaded = yield* this.resuming(rpc.request('session/load', { sessionId, ...session }, SessionOpened)).pipe(Effect.ensuring(Effect.sync(() => (this.loading = false))));
+        const loaded = yield* this.rpc.resuming(rpc.request('session/load', { sessionId, ...session }, SessionOpened)).pipe(Effect.ensuring(Effect.sync(() => (this.loading = false))));
         return yield* this.inMode(rpc, sessionId, loaded);
       }
       const created = yield* rpc.request('session/new', session, SessionCreated);
@@ -165,10 +140,10 @@ export class CursorAdapter extends JsonRpcAdapter<CursorTurn> {
     });
   }
 
-  protected sendPrompt(rpc: JsonRpcConnection, sessionId: string, turn: CursorTurn, prompt: ReadonlyArray<ContentBlock>): Effect.Effect<void, TurnError> {
+  sendPrompt(rpc: JsonRpcConnection, sessionId: string, turn: CursorTurn, prompt: ReadonlyArray<ContentBlock>): Effect.Effect<void, TurnError> {
     return this.switchMode(rpc, sessionId).pipe(
       Effect.zipRight(rpc.request('session/prompt', { sessionId, prompt }, PromptResult)),
-      Effect.flatMap(({ stopReason }) => this.endTurn(turn, turn.cancelRequested ? 'cancelled' : stopReason))
+      Effect.flatMap(({ stopReason }) => this.session.endTurn(turn, turn.cancelRequested ? 'cancelled' : stopReason))
     );
   }
 
@@ -176,14 +151,14 @@ export class CursorAdapter extends JsonRpcAdapter<CursorTurn> {
    * Switches the open session now. If Cursor refuses, it fails, so the thread keeps showing the mode
    * the session still runs in; the next prompt tries the switch again before it runs.
    */
-  protected applyMode(): Effect.Effect<void, ModeChangeFailed> {
-    return this.withSession((rpc, sessionId) =>
-      Effect.mapError(this.switchMode(rpc, sessionId), (error) => new ModeChangeFailed({ agent: this.agent, mode: this.mode, reason: error._tag === 'ConnectionClosed' ? error.reason : error.message }))
+  applyMode(): Effect.Effect<void, ModeChangeFailed> {
+    return this.rpc.withSession((rpc, sessionId) =>
+      Effect.mapError(this.switchMode(rpc, sessionId), (error) => new ModeChangeFailed({ agent: this.session.agent, mode: this.session.mode(), reason: error._tag === 'ConnectionClosed' ? error.reason : error.message }))
     );
   }
 
   /** Records the modes a session opened with and switches it to the one wanted, reporting the mode it then runs in. */
-  private inMode(rpc: JsonRpcConnection, sessionId: string, session: typeof SessionOpened.Type): Effect.Effect<OpenedSession, TurnError> {
+  private inMode(rpc: JsonRpcConnection, sessionId: string, session: SessionOpened): Effect.Effect<OpenedSession, TurnError> {
     return Effect.gen(this, function* () {
       const { modes } = session;
       this.sessionMode = {
@@ -197,12 +172,12 @@ export class CursorAdapter extends JsonRpcAdapter<CursorTurn> {
   }
 
   /** Selects a requested model from the session's live catalog before its first prompt. */
-  private selectModel(rpc: JsonRpcConnection, sessionId: string, session: typeof SessionOpened.Type): Effect.Effect<string, TurnError> {
+  private selectModel(rpc: JsonRpcConnection, sessionId: string, session: SessionOpened): Effect.Effect<string, TurnError> {
     return Effect.gen(this, function* () {
-      const config = session.configOptions?.map((option) => Option.getOrUndefined(decodeModelConfigOption(option))).find((option) => option?.category === 'model' || option?.id === 'model');
+      const config = modelConfig(session.configOptions);
       this.modelConfigId = config?.id;
       this.defaultModelId ??= config?.currentValue ?? session.models?.currentModelId;
-      const requested = this.selectedModel;
+      const requested = this.session.model();
       if (!requested) {
         return opened(sessionId, session).model;
       }
@@ -215,13 +190,12 @@ export class CursorAdapter extends JsonRpcAdapter<CursorTurn> {
           return chosen.name;
         }
         const changed = yield* rpc.request('session/set_config_option', { sessionId, configId: config.id, value: chosen.value }, ConfigOptionsChanged);
-        const selected = changed.configOptions.map((option) => Option.getOrUndefined(decodeModelConfigOption(option))).find((option) => option?.id === config.id);
-        if (selected?.currentValue !== chosen.value) {
+        if (modelConfig(changed.configOptions, config.id)?.currentValue !== chosen.value) {
           return yield* new AgentFailure({ code: 'agent_error', message: `Cursor did not select model "${requested}".` });
         }
         return chosen.name;
       }
-      const chosen = modelChoice(session.models?.availableModels.map(({ modelId, name }) => ({ value: modelId, name })) ?? [], requested);
+      const chosen = modelChoice(modelChoices(session), requested);
       if (!chosen) {
         return yield* new AgentFailure({ code: 'agent_error', message: `Cursor does not offer model "${requested}" in this session.` });
       }
@@ -232,25 +206,24 @@ export class CursorAdapter extends JsonRpcAdapter<CursorTurn> {
     });
   }
 
-  protected applyModel(model: string | undefined): Effect.Effect<void, ModelChangeFailed> {
-    return this.withSession((rpc, sessionId) => {
+  applyModel(model: string | undefined): Effect.Effect<void, ModelChangeFailed> {
+    return this.rpc.withSession((rpc, sessionId) => {
       const chosen = model ?? this.defaultModelId;
       if (chosen === undefined) {
         return Effect.void;
       }
-      const failed = (reason: string) => new ModelChangeFailed({ agent: this.agent, reason });
+      const failed = (reason: string) => new ModelChangeFailed({ agent: this.session.agent, reason });
       if (this.modelConfigId) {
         const configId = this.modelConfigId;
         return rpc.request('session/set_config_option', { sessionId, configId, value: chosen }, ConfigOptionsChanged).pipe(
           Effect.mapError((error) => failed(error._tag === 'ConnectionClosed' ? error.reason : error.message)),
-          Effect.flatMap((changed) => {
-            const selected = changed.configOptions.map((option) => Option.getOrUndefined(decodeModelConfigOption(option))).find((option) => option?.id === configId);
-            return selected?.currentValue === chosen ? Effect.void : failed(`Cursor did not select model "${chosen}".`);
-          })
+          Effect.flatMap((changed) =>
+            modelConfig(changed.configOptions, configId)?.currentValue === chosen ? Effect.void : failed(`Cursor did not select model "${chosen}".`)
+          )
         );
       }
       return Effect.asVoid(Effect.mapError(rpc.request('session/set_model', { sessionId, modelId: chosen }, WireMessage), (error) => new ModelChangeFailed({
-        agent: this.agent,
+        agent: this.session.agent,
         reason: error._tag === 'ConnectionClosed' ? error.reason : error.message,
       })));
     });
@@ -264,13 +237,13 @@ export class CursorAdapter extends JsonRpcAdapter<CursorTurn> {
    */
   private switchMode(rpc: JsonRpcConnection, sessionId: string): Effect.Effect<void, TurnError> {
     return Effect.gen(this, function* () {
-      const wanted = yield* this.native(cursorModeId, CursorModeOverrides, cursorNoLooser);
+      const wanted = yield* this.session.native(cursorModeId, CursorModeOverrides, cursorNoLooser);
       const { current, available } = this.sessionMode;
       const modeId = Option.match(available, { onNone: () => Option.some(wanted), onSome: (offered) => cursorSessionMode(wanted, offered) });
       if (Option.isNone(modeId)) {
         return yield* new AgentFailure({
           code: 'agent_error',
-          message: `Cursor offers no session mode that runs ${MODE_NAMES[this.mode]} (it has no "${wanted}" mode, nor a more restrictive one).`,
+          message: `Cursor offers no session mode that runs ${MODE_NAMES[this.session.mode()]} (it has no "${wanted}" mode, nor a more restrictive one).`,
         });
       }
       if (modeId.value === current) {
@@ -284,21 +257,21 @@ export class CursorAdapter extends JsonRpcAdapter<CursorTurn> {
     });
   }
 
-  protected interrupt(): Effect.Effect<void> {
-    return this.withSession((rpc, sessionId) => rpc.notify('session/cancel', { sessionId }));
+  interrupt(): Effect.Effect<void> {
+    return this.rpc.withSession((rpc, sessionId) => rpc.notify('session/cancel', { sessionId }));
   }
 
-  protected rpcFailure(error: RpcError): AgentFailure {
-    return error.code === AUTH_REQUIRED ? new AgentFailure({ code: 'not_signed_in', message: notSignedInMessage('cursor', 'agent login') }) : super.rpcFailure(error);
+  rpcFailure(error: RpcError): AgentFailure | undefined {
+    return error.code === AUTH_REQUIRED ? new AgentFailure({ code: 'not_signed_in', message: notSignedInMessage('cursor', 'agent login') }) : undefined;
   }
 
-  protected handleNotification(method: string, params: WireMessage | undefined): Effect.Effect<void, MalformedMessage> {
+  handleNotification(method: string, params: WireMessage | undefined): Effect.Effect<void, MalformedMessage> {
     if (method !== 'session/update') {
       return Effect.logDebug(`Skipped Cursor notification ${method}`);
     }
     return Effect.flatMap(decodeMessage(SessionUpdate, params, 'session/update notification'), ({ sessionId, update }) => {
-      const turn = this.turn;
-      if (!turn || this.loading || sessionId !== this.sessionId) {
+      const turn = this.session.turn();
+      if (!turn || this.loading || sessionId !== this.rpc.sessionId) {
         return Effect.void;
       }
       switch (update.variant) {
@@ -330,24 +303,24 @@ export class CursorAdapter extends JsonRpcAdapter<CursorTurn> {
    * fiber of the connection's so the session's other traffic keeps flowing. A request for another
    * session, or one arriving outside a turn, is answered as cancelled.
    */
-  protected handleRequest(method: string, params: WireMessage | undefined): Effect.Effect<Option.Option<Effect.Effect<WireMessage>>, MalformedMessage> {
+  handleRequest(method: string, params: WireMessage | undefined): Effect.Effect<Option.Option<Effect.Effect<WireMessage>>, MalformedMessage> {
     if (method !== 'session/request_permission') {
       return Effect.succeedNone;
     }
     return Effect.map(decodeMessage(RequestPermission, params, `${method} request`), ({ sessionId, toolCall, options }) =>
       Option.some(
         Effect.suspend(() => {
-          const turn = this.turn;
+          const turn = this.session.turn();
           const offered = permissionOptions(options);
-          if (!turn || sessionId !== this.sessionId || offered.length === 0) {
+          if (!turn || sessionId !== this.rpc.sessionId || offered.length === 0) {
             return Effect.succeed(CANCELLED);
           }
           const call = toolCallOf(toolCall.title ?? 'Tool call', toolCall);
           const ask = Effect.zipRight(
             turn.toolCall({ ...call, status: 'pending' }),
-            Effect.map(this.approvals.ask(turn.id, { ...call, status: 'pending' }, offered), (outcome): WireMessage => ({ outcome: { ...outcome } }))
+            Effect.map(this.session.approvals.ask(turn.id, { ...call, status: 'pending' }, offered), (outcome): WireMessage => ({ outcome: { ...outcome } }))
           );
-          if (this.mode !== 'full_auto') {
+          if (this.session.mode() !== 'full_auto') {
             return ask;
           }
           // Full auto asks for nothing: Cursor has no mode that stops asking, so its asks are allowed
@@ -421,7 +394,7 @@ function permissionOptions(options: typeof RequestPermission.Type.options): Perm
   );
 }
 
-function opened(sessionId: string, { models, modes }: typeof SessionOpened.Type): OpenedSession {
+function opened(sessionId: string, { models, modes }: SessionOpened): OpenedSession {
   const model = models && (models.availableModels.find((available) => available.modelId === models.currentModelId)?.name ?? models.currentModelId);
   return { sessionId, model: model ?? 'default', permissionMode: modes?.currentModeId ?? 'default' };
 }
@@ -430,3 +403,9 @@ function modelChoice<T extends { readonly value: string; readonly name: string }
   const normalized = requested.trim().toLowerCase().replaceAll(' ', '-');
   return choices.find((choice) => choice.value.toLowerCase() === normalized) ?? choices.find((choice) => choice.name.toLowerCase().replaceAll(' ', '-') === normalized);
 }
+
+/** Cursor sessions: `make` builds one over the user's own CLI (see CursorHandler). */
+export const CursorAdapter = {
+  make: (options: AdapterOptions): Effect.Effect<AgentAdapter, never, Stdio | SessionServices | Scope.Scope> =>
+    makeAgentSession('cursor', options, (session: AgentSession<CursorTurn>) => Effect.map(Stdio, (stdio) => new CursorHandler(session, stdio))),
+};

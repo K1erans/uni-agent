@@ -2,7 +2,8 @@ import { Effect, Exit, Scope } from 'effect';
 import { describe, expect, it, vi } from 'vitest';
 import type { ExtensionMessage } from './protocol';
 import { FakeAdapter } from './testing/fakeAdapter';
-import { HISTORY_UNREADABLE, makeThread } from './thread';
+import type { CompactedEvent } from './compaction';
+import { HISTORY_UNREADABLE, makeThread, type ThreadFacts, type ThreadRecord } from './thread';
 
 /** Opens a thread over a fake adapter; `prompt` lets forked turns start before it returns. */
 function setup() {
@@ -21,20 +22,16 @@ function setup() {
 }
 
 describe('Thread', () => {
-  it('reserves one turn, rejects a busy prompt, and returns its reviewable result', async () => {
+  it('reserves one turn, rejects a busy prompt, and takes the next once the turn ends', async () => {
     const { thread, adapter, prompt } = setup();
     expect(await prompt('   ')).toEqual({ status: 'rejected', reason: 'empty' });
-    const admitted = await prompt('First');
-    expect(admitted.status).toBe('accepted');
+    expect(await prompt('First')).toEqual({ status: 'accepted' });
     expect(await prompt('Second')).toEqual({ status: 'rejected', reason: 'busy' });
+    expect(thread.status).toBe('running');
     await adapter.say('Done.');
     await adapter.endTurn();
-    if (admitted.status !== 'accepted') {
-      throw new Error('Expected an accepted prompt');
-    }
-    expect(await Effect.runPromise(admitted.completion)).toMatchObject({
-      agent: 'claude', sessionId: adapter.sessionId, stopReason: 'end_turn', response: 'Done.',
-    });
+    expect(thread.status).toBe('idle');
+    expect(await prompt('Third')).toEqual({ status: 'accepted' });
     expect(thread.title).toBe('First');
   });
 
@@ -173,7 +170,7 @@ describe('Thread', () => {
           readOnly: undefined,
           history: Effect.sync(() => {
             loads++;
-            return { events: [{ event: { type: 'turn_started', turnId: 't1', prompt: [{ type: 'text', text: 'Fix the build' }] }, at: 1 }], complete: false };
+            return { events: [{ event: { type: 'turn_started', turnId: 't1', prompt: [{ type: 'text', text: 'Fix the build' }] }, at: 1 }], complete: false, nextSeq: 1 };
           }),
         },
       }).pipe(Scope.extend(scope))
@@ -202,7 +199,7 @@ describe('Thread', () => {
           sessionId: 'stored-session',
           title: 'Fix the build',
           readOnly: undefined,
-          history: Effect.succeed({ events: [], complete: false }),
+          history: Effect.succeed({ events: [], complete: false, nextSeq: 0 }),
         },
       }).pipe(Scope.extend(scope))
     );
@@ -212,4 +209,54 @@ describe('Thread', () => {
     expect(made).toEqual([]);
     await Effect.runPromise(Scope.close(scope, Exit.void));
   });
+
+  it('saves itself from its first prompt, and appends each finished item once', async () => {
+    const { record, saved, appended } = memoryRecord();
+    const made: FakeAdapter[] = [];
+    const scope = Effect.runSync(Scope.make());
+    const thread = Effect.runSync(
+      makeThread('thread-1', { cwd: '/work/uni-agent', name: 'uni-agent' }, FakeAdapter.maker(made), { record }).pipe(Scope.extend(scope))
+    );
+    Effect.runSync(thread.setMode('plan'));
+    expect(saved).toEqual([]);
+
+    await Effect.runPromise(Effect.tap(thread.prompt('Fix the build\nIt fails on CI'), () => Effect.yieldNow()));
+    // Saved before any row, with the session Claude announced up front.
+    expect(saved).toEqual([{ title: 'Fix the build', sessionId: 'session-1', mode: 'plan', model: undefined, readOnly: undefined }]);
+    await made[0].say('Hel');
+    await made[0].say('lo');
+    expect(appended.map(({ event }) => event.type)).toEqual(['turn_started']);
+    await made[0].endTurn();
+    expect(appended.map(({ seq, event }) => [seq, event.type])).toEqual([[0, 'turn_started'], [1, 'session_update'], [2, 'turn_ended']]);
+    expect(appended[1].event).toMatchObject({ update: { content: { text: 'Hello' } } });
+
+    Effect.runSync(thread.setModel('claude-sonnet-4-6'));
+    expect(saved.at(-1)).toMatchObject({ model: 'claude-sonnet-4-6' });
+    await Effect.runPromise(Scope.close(scope, Exit.void));
+  });
+
+  it('saves a kept thread at once, and its first prompt titles it', async () => {
+    const { record, saved } = memoryRecord();
+    const made: FakeAdapter[] = [];
+    const scope = Effect.runSync(Scope.make());
+    const thread = Effect.runSync(
+      makeThread('thread-1', { cwd: '/work/uni-agent', name: 'uni-agent' }, FakeAdapter.maker(made), { record, keep: true }).pipe(Scope.extend(scope))
+    );
+    expect(saved).toEqual([expect.objectContaining({ title: undefined, sessionId: 'session-1' })]);
+
+    await Effect.runPromise(thread.prompt('Late title'));
+    expect(saved.at(-1)).toMatchObject({ title: 'Late title' });
+    await Effect.runPromise(Scope.close(scope, Exit.void));
+  });
 });
+
+/** A thread record in memory: the second adapter at the record seam, besides the SQLite store. */
+function memoryRecord() {
+  const saved: ThreadFacts[] = [];
+  const appended: CompactedEvent[] = [];
+  const record: ThreadRecord = {
+    save: (facts) => Effect.sync(() => void saved.push(facts)),
+    append: (rows) => Effect.sync(() => void appended.push(...rows)),
+  };
+  return { record, saved, appended };
+}

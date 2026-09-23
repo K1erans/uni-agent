@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
@@ -29,8 +30,64 @@ export interface Worktree {
   readonly repo: string;
 }
 
+/** What a worktree has changed since it was created. */
+export interface WorktreeReview {
+  readonly worktree: Worktree;
+  /** `git status --short`; empty when nothing changed. */
+  readonly status: string;
+  /** The diff stat against the starting commit, with new files listed. */
+  readonly diffStat: string;
+}
+
+/** Where worktrees go, and what may run in them. */
+export interface WorktreeSettings {
+  /** The folder checkouts are created in; it must be outside every repository. */
+  readonly storagePath: string;
+  /** Whether the user trusts the workspace; nothing is checked out or run until they do. */
+  readonly isTrusted: () => boolean;
+  /** The command to run in a new checkout of `repo` before it is used, if one is configured. */
+  readonly setupCommand: (repo: string) => string | undefined;
+}
+
+/**
+ * The worktree lifecycle: an isolated checkout on its own branch, created and set up for a thread,
+ * reviewed while the thread works in it, and removed with it. Only trusted workspaces get one,
+ * and a checkout whose setup fails is removed again, so none is left half-made.
+ */
+export class Worktrees extends Context.Tag('uni-agent/Worktrees')<
+  Worktrees,
+  {
+    /** Checks out the repository at `repo` into a new worktree named `slug`, and runs its setup. */
+    readonly create: (repo: string, slug: string) => Effect.Effect<Worktree, GitFailed | WorktreeSetupFailed>;
+    readonly review: (worktree: Worktree) => Effect.Effect<WorktreeReview, GitFailed>;
+    /** Removes the checkout, discarding any changes in it, and its branch too if `discardBranch`. */
+    readonly remove: (worktree: Worktree, discardBranch: boolean) => Effect.Effect<void, GitFailed>;
+    /** Whether the checkout is still on disk. */
+    readonly exists: (worktree: Worktree) => Effect.Effect<boolean>;
+  }
+>() {
+  static live(settings: WorktreeSettings): Layer.Layer<Worktrees, never, GitRunner> {
+    return Layer.effect(
+      Worktrees,
+      Effect.map(GitRunner, (git) => {
+        const withGit = <A, E>(effect: Effect.Effect<A, E, GitRunner>) => Effect.provideService(effect, GitRunner, git);
+        return {
+          create: (repo, slug) =>
+            settings.isTrusted()
+              ? withGit(prepareWorktree(repo, settings.storagePath, slug, settings.setupCommand(repo)))
+              : new WorktreeSetupFailed({ reason: 'Trust this workspace before creating a worktree thread.' }),
+          review: (worktree) => Effect.map(withGit(inspectWorktree(worktree)), (review) => ({ worktree, ...review })),
+          remove: (worktree, discardBranch) => withGit(removeWorktree(worktree, discardBranch)),
+          // Synchronous: it is checked while threads are restored at startup.
+          exists: (worktree) => exists(worktree.path),
+        };
+      })
+    );
+  }
+}
+
 /** Creates an isolated checkout on a new branch; the caller owns its eventual removal. */
-export function createWorktree(repoPath: string, storagePath: string, slug: string): Effect.Effect<Worktree, GitFailed, GitRunner> {
+function createWorktree(repoPath: string, storagePath: string, slug: string): Effect.Effect<Worktree, GitFailed, GitRunner> {
   return Effect.gen(function* () {
     const git = yield* GitRunner;
     if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(slug)) {
@@ -57,7 +114,7 @@ export function createWorktree(repoPath: string, storagePath: string, slug: stri
 }
 
 /** Creates a checkout and runs its setup before a thread may use it. Failed setup removes the checkout. */
-export function prepareWorktree(
+function prepareWorktree(
   repoPath: string,
   storagePath: string,
   slug: string,
@@ -79,7 +136,7 @@ export function prepareWorktree(
  * once done, so a removal that failed partway (or a checkout removed outside Uni Agent) can be
  * retried: git refuses to remove a checkout that is already gone, or a branch already deleted.
  */
-export function removeWorktree(worktree: Worktree, discardBranch: boolean): Effect.Effect<void, GitFailed, GitRunner> {
+function removeWorktree(worktree: Worktree, discardBranch: boolean): Effect.Effect<void, GitFailed, GitRunner> {
   return Effect.gen(function* () {
     const git = yield* GitRunner;
     if (yield* exists(worktree.path)) {
@@ -96,7 +153,7 @@ export function removeWorktree(worktree: Worktree, discardBranch: boolean): Effe
 
 /** Whether a file or folder exists; never fails. */
 function exists(location: string): Effect.Effect<boolean> {
-  return Effect.promise(() => fs.access(location).then(() => true, () => false));
+  return Effect.sync(() => existsSync(location));
 }
 
 /** Runs the configured command in the checkout; interruption stops its shell process. */
@@ -148,7 +205,7 @@ async function canonicalPath(target: string): Promise<string> {
 }
 
 /** Reports tracked changes against the starting commit and lists new files in the diff summary. */
-export function inspectWorktree(worktree: Worktree): Effect.Effect<{ readonly status: string; readonly diffStat: string }, GitFailed, GitRunner> {
+function inspectWorktree(worktree: Worktree): Effect.Effect<{ readonly status: string; readonly diffStat: string }, GitFailed, GitRunner> {
   return Effect.gen(function* () {
     const git = yield* GitRunner;
     const status = yield* git.run(worktree.path, ['status', '--short']);

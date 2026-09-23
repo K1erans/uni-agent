@@ -1,37 +1,28 @@
-import { Context, Data, Effect, Layer, Option, Schema, Stream } from 'effect';
-import { ModelInfo, type AgentKind } from './events';
+import { Chunk, Context, Data, Effect, Layer, Option, Schema, Stream } from 'effect';
+import { binaryMissingMessage } from './adapter';
 import { ClaudeSdk } from './claude/claudeAdapter';
+import { CLAUDE_COMMAND, claudeModels } from './claude/claudeProtocol';
+import { CODEX_ARGS, CODEX_COMMAND, codexModels, initializeCodex } from './codex/codexProtocol';
+import { CURSOR_ARGS, CURSOR_COMMAND, initializeCursor, modelChoices, SessionCreated } from './cursor/cursorProtocol';
+import { ModelInfo, type AgentKind } from './events';
 import { Executables } from './findExecutable';
-import { JsonRpcConnection } from './jsonRpc';
-import { CLIENT_INFO } from './jsonRpcAdapter';
+import { JsonRpcConnection, type ConnectionClosed, type RpcError } from './jsonRpc';
 import { Stdio } from './stdio';
-import { WireMessage } from './traffic';
 
 const Models = Schema.Array(ModelInfo);
-const ClaudeModels = Schema.Array(Schema.Struct({ value: Schema.NonEmptyString, displayName: Schema.NonEmptyString }));
-const CodexPage = Schema.Struct({
-  data: Schema.Array(Schema.Struct({ model: Schema.NonEmptyString, displayName: Schema.NonEmptyString })),
-  nextCursor: Schema.NullOr(Schema.String),
-});
-const CursorSession = Schema.Struct({
-  configOptions: Schema.optional(Schema.Array(WireMessage)),
-  models: Schema.optional(Schema.Struct({
-    availableModels: Schema.Array(Schema.Struct({ modelId: Schema.NonEmptyString, name: Schema.NonEmptyString })),
-  })),
-});
-const CursorModelConfig = Schema.Struct({
-  id: Schema.String,
-  category: Schema.optional(Schema.String),
-  type: Schema.Literal('select'),
-  options: Schema.Array(Schema.Struct({ value: Schema.NonEmptyString, name: Schema.NonEmptyString })),
-});
 
 export class ModelDiscoveryFailed extends Data.TaggedError('ModelDiscoveryFailed')<{
   readonly agent: AgentKind;
   readonly message: string;
 }> {}
 
-/** A catalog is discovered once per agent for the extension's lifetime. */
+const COMMANDS = { claude: CLAUDE_COMMAND, codex: CODEX_COMMAND, cursor: CURSOR_COMMAND } satisfies Record<AgentKind, string>;
+
+/**
+ * The models each agent offers, asked of the agent itself: each agent's protocol module knows how.
+ * An agent's catalog is discovered once per CLI for the extension's lifetime, and a discovery
+ * that fails is not remembered, so the next request tries again.
+ */
 export class ModelCatalog extends Context.Tag('uni-agent/ModelCatalog')<ModelCatalog, {
   readonly list: (agent: AgentKind, cwd: string, executablePath: Option.Option<string>) => Effect.Effect<ReadonlyArray<ModelInfo>, ModelDiscoveryFailed>;
 }>() {
@@ -39,87 +30,62 @@ export class ModelCatalog extends Context.Tag('uni-agent/ModelCatalog')<ModelCat
     const sdk = yield* ClaudeSdk;
     const stdio = yield* Stdio;
     const executables = yield* Executables;
-    const cache = new Map<AgentKind, Effect.Effect<ReadonlyArray<ModelInfo>, ModelDiscoveryFailed>>();
+    const cache = new Map<string, ReadonlyArray<ModelInfo>>();
 
-    const discover = (agent: AgentKind, cwd: string, executablePath: Option.Option<string>): Effect.Effect<ReadonlyArray<ModelInfo>, ModelDiscoveryFailed> =>
-      Effect.gen(function* () {
-        const command = agent === 'cursor' ? 'agent' : agent;
-        const executable = yield* executables.find(command, executablePath);
-        if (Option.isNone(executable)) {
-          return yield* new ModelDiscoveryFailed({ agent, message: `${command} was not found on PATH.` });
-        }
-        let models: ReadonlyArray<ModelInfo>;
-        if (agent === 'claude') {
-          const query = yield* Effect.try({
-            try: () => sdk.query({
-              prompt: Stream.toAsyncIterable(Stream.never),
-              options: { cwd, pathToClaudeCodeExecutable: executable.value },
-            }),
-            catch: (error) => new ModelDiscoveryFailed({ agent, message: error instanceof Error ? error.message : String(error) }),
-          });
-          const result = yield* Effect.tryPromise({
-            try: async () => {
-              try { return await query.supportedModels(); }
-              finally { query.close(); }
-            },
-            catch: (error) => new ModelDiscoveryFailed({ agent, message: error instanceof Error ? error.message : String(error) }),
-          });
-          const decoded = yield* Schema.decodeUnknown(ClaudeModels)(result).pipe(
-            Effect.mapError((error) => new ModelDiscoveryFailed({ agent, message: error.message }))
+    /** Starts the agent's JSON-RPC server for one conversation, stopped when `talk` is done. */
+    const talkTo = <A>(executable: string, args: ReadonlyArray<string>, cwd: string, talk: (rpc: JsonRpcConnection) => Effect.Effect<A, RpcError | ConnectionClosed>) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const process = yield* stdio.spawn({ executable, args, cwd });
+          const rpc = yield* JsonRpcConnection.open(process, { notification: () => Effect.void, request: () => Effect.succeedNone });
+          return yield* talk(rpc);
+        })
+      );
+
+    const ask = (agent: AgentKind, executable: string, cwd: string): Effect.Effect<ReadonlyArray<ModelInfo>, string> => {
+      const failure = (error: RpcError | ConnectionClosed) => (error._tag === 'ConnectionClosed' ? error.reason : error.message);
+      switch (agent) {
+        case 'claude':
+          return Effect.map(claudeModels(sdk.query, executable, cwd), (models) => models.map(({ value, displayName }) => ({ id: value, name: displayName })));
+        case 'codex':
+          return talkTo(executable, CODEX_ARGS, cwd, (rpc) =>
+            Effect.zipRight(initializeCodex(rpc), Stream.runCollect(codexModels(rpc)))
+          ).pipe(
+            Effect.map((models) => Chunk.toReadonlyArray(models).map(({ model, displayName }) => ({ id: model, name: displayName ?? model }))),
+            Effect.mapError(failure)
           );
-          models = decoded.map(({ value, displayName }) => ({ id: value, name: displayName }));
-        } else {
-          models = yield* Effect.scoped(Effect.gen(function* () {
-            const process = yield* stdio.spawn({ executable: executable.value, args: agent === 'codex' ? ['app-server'] : ['acp'], cwd });
-            const rpc = yield* JsonRpcConnection.open(process, {
-              notification: () => Effect.void,
-              request: () => Effect.succeedNone,
-            });
-            if (agent === 'codex') {
-              yield* rpc.request('initialize', { clientInfo: CLIENT_INFO, capabilities: null }, Schema.Unknown);
-              yield* rpc.notify('initialized');
-              const all: ModelInfo[] = [];
-              let cursor: string | null = null;
-              do {
-                const page: typeof CodexPage.Type = yield* rpc.request('model/list', cursor ? { cursor } : {}, CodexPage);
-                all.push(...page.data.map(({ model, displayName }) => ({ id: model, name: displayName })));
-                cursor = page.nextCursor;
-              } while (cursor);
-              return all;
-            }
-            yield* rpc.request('initialize', {
-              protocolVersion: 1,
-              clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-              clientInfo: CLIENT_INFO,
-            }, Schema.Unknown);
-            const session = yield* rpc.request('session/new', { cwd, mcpServers: [] }, CursorSession);
-            if (session.models?.availableModels.length) {
-              return session.models.availableModels.map(({ modelId, name }) => ({ id: modelId, name }));
-            }
-            const options = session.configOptions?.map((value) => Schema.decodeUnknownOption(CursorModelConfig)(value)).flatMap((option) => Option.isSome(option) ? [option.value] : []);
-            const config = options?.find((option) => option.category === 'model' || option.id === 'model');
-            return config?.options.map(({ value, name }) => ({ id: value, name })) ?? [];
-          })).pipe(Effect.mapError((error) => new ModelDiscoveryFailed({
-            agent,
-            message: error._tag === 'ConnectionClosed' ? error.reason : error.message,
-          })));
+        case 'cursor':
+          return talkTo(executable, CURSOR_ARGS, cwd, (rpc) =>
+            Effect.zipRight(initializeCursor(rpc), rpc.request('session/new', { cwd, mcpServers: [] }, SessionCreated))
+          ).pipe(
+            Effect.map((session) => modelChoices(session).map(({ value, name }) => ({ id: value, name }))),
+            Effect.mapError(failure)
+          );
+      }
+    };
+
+    const discover = (agent: AgentKind, cwd: string, executablePath: Option.Option<string>) =>
+      Effect.gen(function* () {
+        const executable = yield* executables.find(COMMANDS[agent], executablePath);
+        if (Option.isNone(executable)) {
+          return yield* new ModelDiscoveryFailed({ agent, message: binaryMissingMessage(agent, COMMANDS[agent], executablePath) });
         }
-        const decoded = yield* Schema.decodeUnknown(Models)(models).pipe(
-          Effect.mapError((error) => new ModelDiscoveryFailed({ agent, message: error.message }))
+        const key = `${agent}\0${executable.value}`;
+        const known = cache.get(key);
+        if (known) {
+          return known;
+        }
+        const models = yield* ask(agent, executable.value, cwd).pipe(
+          Effect.flatMap((found) => Effect.mapError(Schema.decodeUnknown(Models)(found), (error) => error.message)),
+          Effect.mapError((message) => new ModelDiscoveryFailed({ agent, message }))
         );
-        if (decoded.length === 0) {
+        if (models.length === 0) {
           return yield* new ModelDiscoveryFailed({ agent, message: 'The agent returned no models.' });
         }
-        return decoded;
+        cache.set(key, models);
+        return models;
       });
 
-    return { list: (agent: AgentKind, cwd: string, executablePath: Option.Option<string>) => Effect.gen(function* () {
-      let cached = cache.get(agent);
-      if (!cached) {
-        cached = yield* Effect.cached(discover(agent, cwd, executablePath));
-        cache.set(agent, cached);
-      }
-      return yield* cached;
-    }) };
+    return { list: discover };
   }));
 }

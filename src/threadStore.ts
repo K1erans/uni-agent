@@ -1,9 +1,9 @@
 import { Clock, Context, Data, Effect, Either, Layer, ParseResult, Schema } from 'effect';
 import { AgentEvent, AgentKind, Mode, StopReason } from './agents/events';
-import { Compactor, type CompactedEvent } from './compaction';
+import type { CompactedEvent } from './compaction';
 import { Database, type DatabaseError, type Row } from './database';
-import { threadTitle, type ThreadEvent } from './protocol';
-import type { ThreadJournal, Workspace } from './thread';
+import type { ThreadEvent } from './protocol';
+import type { StoredHistory, ThreadFacts, ThreadRecord, Workspace } from './thread';
 import type { Worktree } from './worktrees';
 
 /** The thread store's schema, one migration per version (see `Database.layer`). */
@@ -64,39 +64,23 @@ export interface StoredThread {
   readonly updatedAt: number;
 }
 
-/** A stored thread's history, in the order it happened. */
-export interface StoredHistory {
-  readonly events: ReadonlyArray<ThreadEvent>;
-  /** False if some rows could not be decoded; they are left out of `events`. */
-  readonly complete: boolean;
-}
-
-/** What a journal needs to know about its thread to store it. */
-export interface JournalledThread {
+/** Who a thread is: what does not change over its life, given when its record is made. */
+export interface RecordedThread {
   readonly id: string;
   readonly agent: AgentKind;
   readonly workspace: Workspace;
   readonly worktree: Worktree | undefined;
-  readonly mode: Mode;
-  readonly model: string | undefined;
-  /** Whether the thread is already stored, as a restored one is. */
-  readonly stored: boolean;
-}
-
-/** A thread's journal in the store. */
-export interface StoreJournal extends ThreadJournal {
-  /** Stores the thread now, before its first prompt; does nothing if it is stored already. */
-  readonly keep: Effect.Effect<void>;
 }
 
 /** What the store could not read: a row it skipped, and why. */
 export class UndecodableRow extends Data.TaggedError('UndecodableRow')<{ readonly table: string; readonly reason: string }> {}
 
 /**
- * Keeps threads across reloads in the workspace's database: one row per thread, one per turn, and
- * one per compacted event (see `Compactor`). Rows are decoded when read and never cast; one that
- * does not decode is logged and left out. Writing is best effort: a failed write is logged and the
- * thread carries on.
+ * Keeps threads across reloads in the workspace's database: one row per thread (who it is and its
+ * facts), one per turn, and one per transcript row a thread appends. It maps what threads give it
+ * to rows and back, and knows nothing of how threads decide what to keep. Rows are decoded when
+ * read and never cast; one that does not decode is logged and left out. Writing is best effort: a
+ * failed write is logged and the thread carries on.
  */
 export class ThreadStore extends Context.Tag('uni-agent/ThreadStore')<
   ThreadStore,
@@ -109,11 +93,8 @@ export class ThreadStore extends Context.Tag('uni-agent/ThreadStore')<
     /** Every stored thread, archived or not, most recently changed first. */
     readonly list: Effect.Effect<ReadonlyArray<StoredThread>>;
     readonly history: (threadId: string) => Effect.Effect<StoredHistory>;
-    /**
-     * Records a thread; it is stored from the moment its first prompt is accepted, or earlier if
-     * `keep` is run (for a thread that already has something to keep, such as its worktree).
-     */
-    readonly journal: (thread: JournalledThread) => StoreJournal;
+    /** The record a thread keeps itself in; nothing is stored until the thread first saves. */
+    readonly record: (thread: RecordedThread) => ThreadRecord;
     readonly setArchived: (threadId: string, archived: boolean) => Effect.Effect<void>;
     readonly remove: (threadId: string) => Effect.Effect<void>;
   }
@@ -232,96 +213,48 @@ function makeStore(db: Context.Tag.Service<Database>): Context.Tag.Service<Threa
         }
         events.push({ event: decoded.right.payload, at: decoded.right.at });
       }
-      return { events, complete };
-    }).pipe(bestEffort<StoredHistory>(`load the history of thread ${threadId}`, { events: [], complete: false }));
+      return { events, complete, nextSeq: yield* nextSeq(threadId) };
+    }).pipe(bestEffort<StoredHistory>(`load the history of thread ${threadId}`, { events: [], complete: false, nextSeq: 0 }));
 
-  const journal = (thread: JournalledThread): StoreJournal => {
-    let stored = thread.stored;
-    let sessionId: string | undefined;
-    let mode = thread.mode;
-    let model = thread.model;
-    let compactor: Compactor | undefined;
-
-    const create = (title: string | null, at: number) =>
-      db.run(
-        `INSERT INTO threads (id, agent, model, mode, cwd, workspace_name, worktree_path, worktree_branch, worktree_base, worktree_repo,
-           session_id, title, status, read_only_reason, archived_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, NULL, ?, ?)`,
-        thread.id, thread.agent, model ?? null, mode, thread.workspace.cwd, thread.workspace.name,
-        thread.worktree?.path ?? null, thread.worktree?.branch ?? null, thread.worktree?.base ?? null, thread.worktree?.repo ?? null,
-        sessionId ?? null, title, at, at
-      );
-
-    // A thread not stored yet has no rows, so its compactor starts at 0 without asking the database.
-    const compactorFor = Effect.suspend(() => {
-      if (compactor) {
-        return Effect.succeed(compactor);
-      }
-      return Effect.map(stored ? nextSeq(thread.id) : Effect.succeed(0), (seq) => (compactor = new Compactor(seq)));
-    });
-
-    // Deltas only update the compactor; the database is touched only when there is a row to write.
-    const record = (event: AgentEvent, at: number) =>
-      Effect.gen(function* () {
-        if (event.type === 'session_started') {
-          sessionId = event.sessionId;
-          if (stored) {
-            yield* db.run('UPDATE threads SET session_id = ? WHERE id = ?', sessionId, thread.id);
-          }
-          return;
-        }
-        if (!stored && event.type !== 'turn_started') {
-          return;
-        }
-        const rows = (yield* compactorFor).push(event, at);
-        if (rows.length === 0) {
-          return;
-        }
-        yield* db.transaction(
-          Effect.gen(function* () {
+  const record = (thread: RecordedThread): ThreadRecord => ({
+    // Insert or update: the first save stores the thread, later ones keep its facts current.
+    save: (facts: ThreadFacts) =>
+      Effect.flatMap(Clock.currentTimeMillis, (now) =>
+        db.run(
+          `INSERT INTO threads (id, agent, model, mode, cwd, workspace_name, worktree_path, worktree_branch, worktree_base, worktree_repo,
+             session_id, title, status, read_only_reason, archived_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+           ON CONFLICT (id) DO UPDATE SET model = excluded.model, mode = excluded.mode, session_id = excluded.session_id,
+             title = excluded.title, status = excluded.status, read_only_reason = excluded.read_only_reason`,
+          thread.id, thread.agent, facts.model ?? null, facts.mode, thread.workspace.cwd, thread.workspace.name,
+          thread.worktree?.path ?? null, thread.worktree?.branch ?? null, thread.worktree?.base ?? null, thread.worktree?.repo ?? null,
+          facts.sessionId ?? null, facts.title ?? null, facts.readOnly === undefined ? 'active' : 'read_only', facts.readOnly ?? null, now, now
+        )
+      ).pipe(bestEffort<void>(`store thread ${thread.id}`, undefined)),
+    // Turn boundaries among the rows keep the turns table, which the load after a crash reads.
+    append: (rows: ReadonlyArray<CompactedEvent>) =>
+      db.transaction(
+        Effect.gen(function* () {
+          for (const { event, at } of rows) {
             if (event.type === 'turn_started') {
-              const title = threadTitle(event.prompt.map((block) => block.text).join('\n'));
-              if (!stored) {
-                yield* create(title, at);
-                stored = true;
-              }
               yield* db.run("INSERT INTO turns (thread_id, id, started_at, status) VALUES (?, ?, ?, 'running')", thread.id, event.turnId, at);
-              // A thread kept before its first prompt is titled by that prompt.
-              yield* db.run('UPDATE threads SET updated_at = ?, title = coalesce(title, ?) WHERE id = ?', at, title, thread.id);
             } else if (event.type === 'turn_ended') {
               yield* db.run('UPDATE turns SET status = ?, ended_at = ? WHERE thread_id = ? AND id = ?', event.stopReason, at, thread.id, event.turnId);
-              yield* db.run('UPDATE threads SET updated_at = ? WHERE id = ?', at, thread.id);
             }
-            yield* insertEvents(thread.id, rows);
-          })
-        );
-      }).pipe(bestEffort<void>(`store an event of thread ${thread.id}`, undefined));
-
-    const update = (what: string, sql: string, ...parameters: ReadonlyArray<string | null>) =>
-      Effect.suspend(() => (stored ? db.run(sql, ...parameters, thread.id) : Effect.void)).pipe(bestEffort<void>(`store the ${what} of thread ${thread.id}`, undefined));
-
-    return {
-      record,
-      keep: Effect.suspend(() =>
-        stored ? Effect.void : Effect.flatMap(Clock.currentTimeMillis, (at) => Effect.as(create(null, at), undefined)).pipe(Effect.tap(() => { stored = true; }))
-      ).pipe(bestEffort<void>(`store thread ${thread.id}`, undefined)),
-      setMode: (next) => Effect.suspend(() => {
-        mode = next;
-        return update('mode', 'UPDATE threads SET mode = ? WHERE id = ?', next);
-      }),
-      setModel: (next) => Effect.suspend(() => {
-        model = next;
-        return update('model', 'UPDATE threads SET model = ? WHERE id = ?', next ?? null);
-      }),
-      markReadOnly: (reason) => update('read-only state', "UPDATE threads SET status = 'read_only', read_only_reason = ? WHERE id = ?", reason),
-    };
-  };
+          }
+          yield* insertEvents(thread.id, rows);
+          if (rows.some(({ event }) => event.type === 'turn_started' || event.type === 'turn_ended')) {
+            yield* db.run('UPDATE threads SET updated_at = ? WHERE id = ?', Math.max(...rows.map(({ at }) => at)), thread.id);
+          }
+        })
+      ).pipe(bestEffort<void>(`store the transcript of thread ${thread.id}`, undefined)),
+  });
 
   return {
     load,
     list,
     history,
-    journal,
+    record,
     setArchived: (threadId, archived) =>
       Effect.flatMap(Clock.currentTimeMillis, (now) =>
         db.run('UPDATE threads SET archived_at = ? WHERE id = ?', archived ? now : null, threadId)

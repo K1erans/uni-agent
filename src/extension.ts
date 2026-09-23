@@ -22,10 +22,10 @@ import { outputChannelLogger } from './logger';
 import { MIN_VSCODE_VERSION, nodeSqliteAvailable } from './nodeSqlite';
 import { modeSettingsLive, readSetting } from './settings';
 import { registerSidebar, SIDEBAR_VIEW_ID } from './sidebar';
-import type { Thread, ThreadStatus, Workspace } from './thread';
-import { makeThreads, type Threads } from './threads';
-import { THREAD_STORE_MIGRATIONS, ThreadStore, type StoredThread } from './threadStore';
-import { GitRunner, inspectWorktree, WorktreeSetupFailed, type GitFailed, type Worktree } from './worktrees';
+import type { ThreadStatus, Workspace } from './thread';
+import { makeThreads, type Threads, type ThreadSummary } from './threads';
+import { THREAD_STORE_MIGRATIONS, ThreadStore } from './threadStore';
+import { GitRunner, Worktrees, type GitFailed, type Worktree, type WorktreeSetupFailed } from './worktrees';
 
 const COMMANDS = [
   'uniAgent.newThread',
@@ -64,22 +64,24 @@ function start(context: vscode.ExtensionContext): Effect.Effect<UniAgentApi | un
         ModelCatalog.live.pipe(Layer.provide(Layer.mergeAll(ClaudeSdk.live, Stdio.live, Executables.live))),
         Ids.live,
         gitBranchesLive,
-        GitRunner.live,
+        Worktrees.live({
+          storagePath: path.join(context.globalStorageUri.fsPath, 'worktrees'),
+          isTrusted: () => vscode.workspace.isTrusted,
+          // Workspace settings may come from the repository, so they are read only once VS Code
+          // trusts the workspace, which `Worktrees` requires before anything runs.
+          setupCommand: (repo) => Option.getOrUndefined(readSetting('worktree.setupCommand', Schema.NonEmptyString, vscode.Uri.file(repo))),
+        }).pipe(Layer.provide(GitRunner.live)),
         modeSettingsLive,
         FullAutoOptIn.live(context.workspaceState)
       )
     );
-    return yield* startServices(context.extensionUri, context.globalStorageUri.fsPath, context.storageUri?.fsPath, channel).pipe(Effect.provide(runtime));
+    return yield* startServices(context.extensionUri, context.storageUri?.fsPath, channel).pipe(Effect.provide(runtime));
   });
 }
 
-/**
- * @param storagePath The extension's global storage, where worktrees are checked out.
- * @param workspaceStoragePath This workspace's storage, where threads are kept; none when no folder is open.
- */
+/** @param workspaceStoragePath This workspace's storage, where threads are kept; none when no folder is open. */
 function startServices(
   extensionUri: vscode.Uri,
-  storagePath: string,
   workspaceStoragePath: string | undefined,
   channel: vscode.LogOutputChannel
 ): Effect.Effect<UniAgentApi | undefined, never, Services | Scope.Scope> {
@@ -101,19 +103,12 @@ function startServices(
     // Built in the extension's scope before the threads, so it closes after they have stopped.
     const store = yield* Layer.build(threadStoreLive(workspaceStoragePath));
 
-    const run = Runtime.runFork(yield* Effect.runtime<GitRunner>());
+    const run = Runtime.runFork(yield* Effect.runtime<never>());
     // The sidebar shows one thread at a time, so its badge counts the others waiting for an answer.
     let sidebar: vscode.WebviewView | undefined;
     // VS Code disposes the view whenever the sidebar is hidden, and a disposed one refuses a badge.
     const showWaiting = (): Effect.Effect<void> => Effect.ignore(Effect.try(() => badgeWaiting(sidebar, threads)));
-    const threads: Threads = yield* makeThreads({ fallback: currentWorkspace, choose: pickWorkspace }, makeAdapter, showWaiting, {
-      storagePath: path.join(storagePath, 'worktrees'),
-      // Workspace settings may come from the repository. Never execute one while VS Code
-      // considers that workspace untrusted, even if a caller bypasses the command picker.
-      setupCommand: (where) => vscode.workspace.isTrusted
-        ? Option.getOrUndefined(readSetting('worktree.setupCommand', Schema.NonEmptyString, vscode.Uri.file(where.cwd)))
-        : undefined,
-    }).pipe(Effect.provide(store));
+    const threads: Threads = yield* makeThreads({ fallback: currentWorkspace, choose: pickWorkspace }, makeAdapter, showWaiting).pipe(Effect.provide(store));
     const webviewReady = yield* disposable(() => new vscode.EventEmitter<vscode.WebviewView>());
     yield* registerSidebar(extensionUri, threads, (view) => {
       sidebar = view;
@@ -129,8 +124,8 @@ function startServices(
       'uniAgent.openWorktree': () => run(showWorktreeError(openWorktree(threads))),
       'uniAgent.removeWorktree': () => run(showWorktreeError(removeShownWorktree(threads))),
       'uniAgent.showThreadHistory': () => run(pickThread(threads)),
-      'uniAgent.archiveThread': () => run(threads.current ? threads.archive(threads.current.info.id) : Effect.void),
-      'uniAgent.deleteThread': () => run(showWorktreeError(threads.current ? deleteThread(threads, threads.current.info.id, threads.current.title) : Effect.void)),
+      'uniAgent.archiveThread': () => run(Effect.suspend(() => onShown(threads, (shown) => threads.archive(shown.id)))),
+      'uniAgent.deleteThread': () => run(showWorktreeError(Effect.suspend(() => onShown(threads, (shown) => deleteThread(threads, shown))))),
       'uniAgent.showLogs': () => channel.show(),
       'uniAgent.openSettings': () => void vscode.commands.executeCommand('workbench.action.openSettings', '@ext:uni-agent.uni-agent'),
     } satisfies Record<(typeof COMMANDS)[number], () => void>;
@@ -142,7 +137,7 @@ function startServices(
   });
 }
 
-type Services = ClaudeSdk | Stdio | Executables | ModelCatalog | Ids | Branches | ModeSettings | FullAutoOptIn | GitRunner;
+type Services = ClaudeSdk | Stdio | Executables | ModelCatalog | Ids | Branches | ModeSettings | FullAutoOptIn | Worktrees;
 
 const revealSidebar = Effect.promise(async () => vscode.commands.executeCommand(`${SIDEBAR_VIEW_ID}.focus`));
 
@@ -151,12 +146,12 @@ function badgeWaiting(view: vscode.WebviewView | undefined, threads: Threads): v
   if (!view) {
     return;
   }
-  const waiting = threads.list().filter((thread) => thread.needsApproval).length;
+  const waiting = threads.list().filter((thread) => thread.status === 'needs_approval').length;
   view.badge = waiting === 0 ? undefined : { value: waiting, tooltip: waiting === 1 ? '1 thread needs approval' : `${waiting} threads need approval` };
 }
 
-/** An entry in Thread History: a thread in the window, an archived one, or the way to the archived ones. */
-type HistoryItem = vscode.QuickPickItem & { readonly entry: { readonly kind: 'thread'; readonly thread: Thread } | { readonly kind: 'archived'; readonly thread: StoredThread } | { readonly kind: 'show_archived' } };
+/** An entry in Thread History: a thread (in the window or archived), or the way to the archived ones. */
+type HistoryItem = vscode.QuickPickItem & { readonly entry: ThreadSummary | 'show_archived' };
 
 type HistoryChoice = { readonly action: 'open' | 'archive' | 'delete'; readonly item: HistoryItem };
 
@@ -177,43 +172,33 @@ const STATUS_NOTES = {
  * button, brings it back.
  * After archiving or deleting, the list opens again, so several can be tidied in a row.
  */
-function pickThread(threads: Threads, archivedOnly = false): Effect.Effect<void, never, GitRunner> {
+function pickThread(threads: Threads, archivedOnly = false): Effect.Effect<void> {
   return Effect.gen(function* () {
-    const current = threads.current;
     const archived = threads.archived();
+    const item = (thread: ThreadSummary): HistoryItem => ({
+      label: thread.title ?? 'New thread',
+      description: [STATUS_NOTES[thread.status], ...(thread.shown ? ['Current'] : [])].join(' · '),
+      detail: `${AGENT_NAMES[thread.agent]} · ${thread.workspace.name ?? 'No folder open'}`,
+      buttons: thread.archived ? [UNARCHIVE_BUTTON, DELETE_BUTTON] : [ARCHIVE_BUTTON, DELETE_BUTTON],
+      entry: thread,
+    });
     const items: HistoryItem[] = archivedOnly
-      ? archived.map((thread) => ({
-          label: thread.title ?? 'New thread',
-          description: thread.readOnly ? STATUS_NOTES.read_only : undefined,
-          detail: `${AGENT_NAMES[thread.agent]} · ${thread.workspace.name ?? 'No folder open'}`,
-          buttons: [UNARCHIVE_BUTTON, DELETE_BUTTON],
-          entry: { kind: 'archived', thread },
-        }))
-      : [
-          ...threads.list().map((thread): HistoryItem => ({
-            label: thread.title ?? 'New thread',
-            description: [STATUS_NOTES[thread.status], ...(thread === current ? ['Current'] : [])].join(' · '),
-            detail: `${AGENT_NAMES[thread.info.agent]} · ${thread.workspace.name ?? 'No folder open'}`,
-            buttons: [ARCHIVE_BUTTON, DELETE_BUTTON],
-            entry: { kind: 'thread', thread },
-          })),
-          ...(archived.length > 0 ? [{ label: `$(archive) Archived threads (${archived.length})`, entry: { kind: 'show_archived' } } as const] : []),
-        ];
+      ? archived.map(item)
+      : [...threads.list().map(item), ...(archived.length > 0 ? [{ label: `$(archive) Archived threads (${archived.length})`, entry: 'show_archived' } as const] : [])];
     const choice = yield* choose(items, archivedOnly ? 'Archived Threads' : 'Thread History', archivedOnly ? 'Bring an archived thread back' : 'Switch to a thread in this workspace');
     if (!choice) {
       return;
     }
     const { entry } = choice.item;
-    if (entry.kind === 'show_archived') {
+    if (entry === 'show_archived') {
       return yield* pickThread(threads, true);
     }
-    const threadId = entry.kind === 'thread' ? entry.thread.info.id : entry.thread.id;
     if (choice.action === 'open') {
-      yield* entry.kind === 'thread' ? threads.select(threadId) : threads.unarchive(threadId);
+      yield* entry.archived ? threads.unarchive(entry.id) : threads.select(entry.id);
       yield* revealSidebar;
       return;
     }
-    yield* choice.action === 'archive' ? threads.archive(threadId) : showWorktreeError(deleteThread(threads, threadId, entry.thread.title));
+    yield* choice.action === 'archive' ? threads.archive(entry.id) : showWorktreeError(deleteThread(threads, entry));
     yield* pickThread(threads, archivedOnly && threads.archived().length > 0);
   });
 }
@@ -251,11 +236,11 @@ function choose(items: ReadonlyArray<HistoryItem>, title: string, placeholder: s
  * Deletes a thread once the user confirms. A worktree thread goes through the same confirmation as
  * Remove Worktree, since its checkout goes with it.
  */
-function deleteThread(threads: Threads, threadId: string, title: string | undefined): Effect.Effect<void, GitFailed, GitRunner> {
+function deleteThread(threads: Threads, { id: threadId, title, worktree }: ThreadSummary): Effect.Effect<void, GitFailed> {
   return Effect.gen(function* () {
-    const worktree = threads.worktreeOf(threadId);
     if (worktree) {
-      const status = yield* Effect.orElseSucceed(inspectWorktree(worktree).pipe(Effect.map(({ status }) => status)), () => '');
+      // A checkout that has gone has no status to show; it can still be deleted.
+      const status = yield* Effect.orElseSucceed(Effect.map(threads.reviewWorktree(threadId), (review) => review?.status ?? ''), () => '');
       const discardBranch = yield* confirmWorktreeRemoval(worktree, status);
       if (Option.isSome(discardBranch)) {
         yield* threads.remove(threadId, discardBranch.value);
@@ -277,10 +262,7 @@ function deleteThread(threads: Threads, threadId: string, title: string | undefi
 /** Starts a thread with the agent the user picks; a stand-in until the agent picker lands. */
 function pickAgent(threads: Threads, isolated = false): Effect.Effect<void, GitFailed | WorktreeSetupFailed> {
   return Effect.gen(function* () {
-    if (isolated && !vscode.workspace.isTrusted) {
-      return yield* new WorktreeSetupFailed({ reason: 'Trust this workspace before creating a worktree thread.' });
-    }
-    const shown = threads.current?.info.agent;
+    const shown = threads.shown()?.agent;
     const items = AgentKind.literals.map((agent) => ({
       label: AGENT_NAMES[agent],
       description: agent === shown ? 'Current' : undefined,
@@ -314,10 +296,19 @@ function showWorktreeError<A, R>(effect: Effect.Effect<A, GitFailed | WorktreeSe
   }));
 }
 
+const SHARED_WORKSPACE = 'The shown thread uses the shared workspace.';
+
+/** Runs `f` on the shown thread, if there is one. */
+function onShown<E>(threads: Threads, f: (shown: ThreadSummary) => Effect.Effect<void, E>): Effect.Effect<void, E> {
+  const shown = threads.shown();
+  return shown ? f(shown) : Effect.void;
+}
+
 function reviewWorktree(threads: Threads, channel: vscode.LogOutputChannel) {
-  return Effect.flatMap(threads.reviewCurrentWorktree(), (review) => Effect.sync(() => {
+  const shown = threads.shown();
+  return Effect.flatMap(shown ? threads.reviewWorktree(shown.id) : Effect.succeed(undefined), (review) => Effect.sync(() => {
     if (!review) {
-      void vscode.window.showInformationMessage('The shown thread uses the shared workspace.');
+      void vscode.window.showInformationMessage(SHARED_WORKSPACE);
       return;
     }
     channel.appendLine(`Worktree ${review.worktree.path} (${review.worktree.branch})`);
@@ -328,27 +319,23 @@ function reviewWorktree(threads: Threads, channel: vscode.LogOutputChannel) {
 }
 
 function openWorktree(threads: Threads) {
-  return Effect.flatMap(threads.reviewCurrentWorktree(), (review) => Effect.promise(async () => {
-    if (review) {
-      await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(review.worktree.path), true);
+  const worktree = threads.shown()?.worktree;
+  return Effect.promise(async () => {
+    if (worktree) {
+      await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(worktree.path), true);
     } else {
-      await vscode.window.showInformationMessage('The shown thread uses the shared workspace.');
-    }
-  }));
-}
-
-function removeShownWorktree(threads: Threads) {
-  return Effect.gen(function* () {
-    const review = yield* threads.reviewCurrentWorktree();
-    if (!review) {
-      yield* Effect.promise(async () => vscode.window.showInformationMessage('The shown thread uses the shared workspace.'));
-      return;
-    }
-    const discardBranch = yield* confirmWorktreeRemoval(review.worktree, review.status);
-    if (Option.isSome(discardBranch)) {
-      yield* threads.removeCurrentWorktree(discardBranch.value);
+      await vscode.window.showInformationMessage(SHARED_WORKSPACE);
     }
   });
+}
+
+/** Removing a worktree deletes its thread, so it is the same as Delete Thread on a worktree thread. */
+function removeShownWorktree(threads: Threads): Effect.Effect<void, GitFailed> {
+  const shown = threads.shown();
+  if (!shown?.worktree) {
+    return Effect.asVoid(Effect.promise(async () => vscode.window.showInformationMessage(SHARED_WORKSPACE)));
+  }
+  return deleteThread(threads, shown);
 }
 
 /**

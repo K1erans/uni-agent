@@ -2,7 +2,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { Context, Effect, Exit, Layer, Option, Scope } from 'effect';
+import { Context, Deferred, Effect, Exit, Layer, Option, Scope } from 'effect';
 import { describe, expect, it } from 'vitest';
 import { Branches } from './branches';
 import { FullAutoOptIn } from './fullAutoOptIn';
@@ -12,7 +12,7 @@ import { FakeAdapter } from './testing/fakeAdapter';
 import type { Post, Workspace } from './thread';
 import { makeThreads } from './threads';
 import { ThreadStore } from './threadStore';
-import { GitRunner } from './worktrees';
+import { GitRunner, Worktrees, type Worktree } from './worktrees';
 
 /** A webview double recording what it is sent. */
 function webview() {
@@ -26,18 +26,30 @@ export function memoryStore(): Context.Context<ThreadStore> {
   return Effect.runSync(Layer.build(Layer.orDie(ThreadStore.memory)).pipe(Scope.extend(Effect.runSync(Scope.make()))));
 }
 
-/**
- * @param optedIn Whether the workspace has already allowed Full auto.
- * @param store The store the window keeps its threads in; share one between two setups to reload.
- * @param chosen The folder the user picks when the sidebar opens with no thread to show; none if they decline.
- */
-function setup(
+/** How a test window is set up; everything left out takes its default. */
+interface Setup {
+  /** Whether the workspace has already allowed Full auto. */
+  readonly optedIn?: boolean;
+  /** A real repository for worktree threads, and where their checkouts go. */
+  readonly worktree?: { readonly repo: string; readonly storage: string };
+  /** The store the window keeps its threads in; share one between two setups to reload. */
+  readonly store?: Context.Context<ThreadStore>;
+  /** Whether the agents still have the sessions stored threads resume. */
+  readonly resumable?: boolean;
+  /** The folder the user picks when the sidebar opens with no thread to show; none if they decline. */
+  readonly chosen?: Option.Option<Workspace>;
+  /** Replaces the worktrees module, which otherwise runs real git. */
+  readonly worktrees?: Layer.Layer<Worktrees>;
+}
+
+function setup({
   optedIn = false,
-  worktree?: { readonly repo: string; readonly storage: string },
+  worktree,
   store = memoryStore(),
   resumable = true,
-  chosen: Option.Option<Workspace> = Option.some({ cwd: worktree?.repo ?? '/work/uni-agent', name: 'uni-agent' })
-) {
+  chosen = Option.some({ cwd: worktree?.repo ?? '/work/uni-agent', name: 'uni-agent' }),
+  worktrees,
+}: Setup = {}) {
   const made: FakeAdapter[] = [];
   /** The folders whose branch is being watched right now. */
   const watching: string[] = [];
@@ -53,15 +65,18 @@ function setup(
         }),
     }),
     Layer.succeed(FullAutoOptIn, { granted: Effect.succeed(optedIn), grant: Effect.void }),
-    GitRunner.live
+    worktrees ?? Worktrees.live({
+      storagePath: worktree?.storage ?? path.join(os.tmpdir(), 'uni-agent-no-worktrees'),
+      isTrusted: () => true,
+      setupCommand: () => 'echo ready > setup.txt',
+    }).pipe(Layer.provide(GitRunner.live))
   );
   const scope = Effect.runSync(Scope.make());
   const threads = Effect.runSync(
     makeThreads(
       { fallback: () => ({ cwd: worktree?.repo ?? '/work/uni-agent', name: 'uni-agent' }), choose: Effect.succeed(chosen) },
       (agent) => FakeAdapter.maker(made, agent, resumable),
-      () => Effect.void,
-      worktree ? { storagePath: worktree.storage, setupCommand: () => 'echo ready > setup.txt' } : undefined
+      () => Effect.void
     ).pipe(Scope.extend(scope), Effect.provide(services), Effect.provide(store))
   );
   return {
@@ -85,16 +100,17 @@ describe('Threads', () => {
     await fs.writeFile(path.join(repo, 'file.txt'), 'before\n');
     execFileSync('git', ['add', 'file.txt'], { cwd: repo });
     execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'initial'], { cwd: repo });
-    const { threads, run, close } = setup(false, { repo, storage: path.join(root, 'storage') });
+    const { threads, run, close } = setup({ worktree: { repo, storage: path.join(root, 'storage') } });
     try {
       await run(threads.connect(webview().post));
       const isolated = await run(threads.createInWorktree('cursor'));
       expect(isolated.workspace.cwd).toContain('thread-2');
       expect(await fs.readFile(path.join(isolated.workspace.cwd, 'setup.txt'), 'utf8')).toContain('ready');
-      const review = await run(threads.reviewCurrentWorktree());
+      const review = await run(threads.reviewWorktree(isolated.id));
       expect(review?.diffStat).toContain('setup.txt');
-      expect(await run(threads.removeCurrentWorktree(true))).toBe(true);
-      expect(threads.current?.info.id).toBe('thread-1');
+      expect(await run(threads.reviewWorktree('thread-1'))).toBeUndefined();
+      expect(await run(threads.remove(isolated.id, true))).toBe(true);
+      expect(threads.shown()?.id).toBe('thread-1');
       expect(execFileSync('git', ['branch', '--list', 'uni/thread-2'], { cwd: repo }).toString().trim()).toBe('');
     } finally {
       await close();
@@ -111,18 +127,18 @@ describe('Threads', () => {
     execFileSync('git', ['add', 'file.txt'], { cwd: repo });
     execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'initial'], { cwd: repo });
     const store = memoryStore();
-    const first = setup(false, { repo, storage: path.join(root, 'storage') }, store);
+    const first = setup({ worktree: { repo, storage: path.join(root, 'storage') }, store });
     try {
       await first.run(first.threads.connect(webview().post));
       const isolated = await first.run(first.threads.createInWorktree('codex'));
-      await first.run(first.threads.archive(isolated.info.id));
-      expect(first.threads.archived().map((thread) => [thread.id, thread.title, thread.worktree?.path])).toEqual([[isolated.info.id, undefined, isolated.workspace.cwd]]);
+      await first.run(first.threads.archive(isolated.id));
+      expect(first.threads.archived().map((thread) => [thread.id, thread.title, thread.worktree?.path])).toEqual([[isolated.id, undefined, isolated.workspace.cwd]]);
       await first.close();
 
       // After a reload it is still reachable, so deleting it removes the checkout.
-      const reloaded = setup(false, { repo, storage: path.join(root, 'storage') }, store);
-      expect(reloaded.threads.archived().map((thread) => thread.id)).toEqual([isolated.info.id]);
-      expect(await reloaded.run(reloaded.threads.remove(isolated.info.id, true))).toBe(true);
+      const reloaded = setup({ worktree: { repo, storage: path.join(root, 'storage') }, store });
+      expect(reloaded.threads.archived().map((thread) => thread.id)).toEqual([isolated.id]);
+      expect(await reloaded.run(reloaded.threads.remove(isolated.id, true))).toBe(true);
       await expect(fs.access(isolated.workspace.cwd)).rejects.toThrow();
       await reloaded.close();
     } finally {
@@ -139,42 +155,31 @@ describe('Threads', () => {
     execFileSync('git', ['add', 'file.txt'], { cwd: repo });
     execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'initial'], { cwd: repo });
     const store = memoryStore();
-    const first = setup(false, { repo, storage: path.join(root, 'storage') }, store);
+    const first = setup({ worktree: { repo, storage: path.join(root, 'storage') }, store });
     try {
       await first.run(first.threads.connect(webview().post));
       const isolated = await first.run(first.threads.createInWorktree('codex'));
       // A locked checkout needs a second --force, so removing it fails.
       execFileSync('git', ['worktree', 'lock', isolated.workspace.cwd], { cwd: repo });
 
-      await expect(first.run(first.threads.remove(isolated.info.id, true))).rejects.toThrow();
-      expect(first.threads.list().map((thread) => thread.info.id)).not.toContain(isolated.info.id);
-      expect(first.threads.archived().map((thread) => [thread.id, thread.worktree?.path])).toEqual([[isolated.info.id, isolated.workspace.cwd]]);
+      await expect(first.run(first.threads.remove(isolated.id, true))).rejects.toThrow();
+      expect(first.threads.list().map((thread) => thread.id)).not.toContain(isolated.id);
+      expect(first.threads.archived().map((thread) => [thread.id, thread.worktree?.path])).toEqual([[isolated.id, isolated.workspace.cwd]]);
       await fs.access(isolated.workspace.cwd);
       await first.close();
 
       // Still reachable after a reload, so once the lock is gone Delete finishes the job.
       execFileSync('git', ['worktree', 'unlock', isolated.workspace.cwd], { cwd: repo });
-      const reloaded = setup(false, { repo, storage: path.join(root, 'storage') }, store);
-      expect(reloaded.threads.archived().map((thread) => thread.id)).toEqual([isolated.info.id]);
-      expect(await reloaded.run(reloaded.threads.remove(isolated.info.id, true))).toBe(true);
+      const reloaded = setup({ worktree: { repo, storage: path.join(root, 'storage') }, store });
+      expect(reloaded.threads.archived().map((thread) => thread.id)).toEqual([isolated.id]);
+      expect(await reloaded.run(reloaded.threads.remove(isolated.id, true))).toBe(true);
       expect(reloaded.threads.archived()).toEqual([]);
       await expect(fs.access(isolated.workspace.cwd)).rejects.toThrow();
-      expect(execFileSync('git', ['branch', '--list', `uni/${isolated.info.id}`], { cwd: repo }).toString().trim()).toBe('');
+      expect(execFileSync('git', ['branch', '--list', `uni/${isolated.id}`], { cwd: repo }).toString().trim()).toBe('');
       await reloaded.close();
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
-  });
-
-  it('titles a kept thread with its first prompt', async () => {
-    const store = memoryStore();
-    const journal = Context.get(store, ThreadStore).journal({
-      id: 'thread-9', agent: 'claude', workspace: { cwd: '/work/uni-agent', name: 'uni-agent' }, worktree: undefined, mode: 'auto_edit', model: undefined, stored: false,
-    });
-    await Effect.runPromise(journal.keep);
-    await Effect.runPromise(journal.record({ type: 'turn_started', turnId: 't1', prompt: [{ type: 'text', text: 'Late title' }] }, 5));
-
-    expect(Effect.runSync(Context.get(store, ThreadStore).list).map((thread) => thread.title)).toEqual(['Late title']);
   });
 
   it('creates a thread for the first webview and sends it the thread, then its branch', async () => {
@@ -191,17 +196,39 @@ describe('Threads', () => {
 
   it('asks for the folder of the thread the sidebar opens with, and opens none if the user declines', async () => {
     const other = { cwd: '/work/docs', name: 'docs' };
-    const picked = setup(false, undefined, memoryStore(), true, Option.some(other));
+    const picked = setup({ chosen: Option.some(other) });
     const view = webview();
     await picked.run(picked.threads.connect(view.post));
-    expect(picked.threads.current?.workspace).toEqual(other);
+    expect(picked.threads.shown()?.workspace).toEqual(other);
     expect(historyOf(view.messages)).toMatchObject({ thread: { workspace: 'docs' } });
 
-    const declined = setup(false, undefined, memoryStore(), true, Option.none());
+    const declined = setup({ chosen: Option.none() });
     const unseen = webview();
     await declined.run(declined.threads.connect(unseen.post));
     expect(declined.threads.list()).toEqual([]);
     expect(unseen.messages).toEqual([]);
+  });
+
+  it('sets up a worktree without holding up prompts to other threads', async () => {
+    const created = Effect.runSync(Deferred.make<Worktree>());
+    const worktree: Worktree = { path: '/storage/thread-2', branch: 'uni/thread-2', base: 'abc123', repo: '/work/uni-agent' };
+    const slow = Layer.succeed(Worktrees, {
+      create: () => Deferred.await(created),
+      review: (checkout) => Effect.succeed({ worktree: checkout, status: '', diffStat: '' }),
+      remove: () => Effect.void,
+      exists: () => Effect.succeed(true),
+    });
+    const { threads, made, run } = setup({ worktrees: slow });
+    const view = webview();
+    await run(threads.connect(view.post));
+
+    const creating = Effect.runPromise(threads.createInWorktree('codex'));
+    // While the setup command runs, the shown thread still takes its prompt.
+    expect(await run(threads.submit(view.post, 'thread-1', 'Meanwhile'))).toEqual({ status: 'accepted' });
+    expect(made[0].prompts).toHaveLength(1);
+
+    await Effect.runPromise(Deferred.succeed(created, worktree));
+    expect(await creating).toMatchObject({ id: 'thread-2', worktree, shown: true });
   });
 
   it('shows the untouched current thread again instead of creating another', async () => {
@@ -210,7 +237,7 @@ describe('Threads', () => {
 
     const again = await run(threads.create());
 
-    expect(again.info.id).toBe('thread-1');
+    expect(again.id).toBe('thread-1');
     expect(threads.list()).toHaveLength(1);
   });
 
@@ -220,13 +247,13 @@ describe('Threads', () => {
     await run(threads.connect(view.post));
 
     const codex = await run(threads.create('codex'));
-    expect(codex.info).toEqual({ id: 'thread-2', agent: 'codex', workspace: 'uni-agent' });
+    expect(codex).toMatchObject({ id: 'thread-2', agent: 'codex', workspace: { name: 'uni-agent' }, shown: true });
     expect(historyOf(view.messages)).toMatchObject({ thread: { id: 'thread-2', agent: 'codex' } });
 
     // The untouched Codex thread is shown again rather than duplicated.
-    expect((await run(threads.create())).info.id).toBe('thread-2');
-    expect((await run(threads.create('cursor'))).info).toMatchObject({ id: 'thread-3', agent: 'cursor' });
-    expect(threads.list().map((thread) => thread.info.agent)).toEqual(['cursor', 'codex', 'claude']);
+    expect((await run(threads.create())).id).toBe('thread-2');
+    expect(await run(threads.create('cursor'))).toMatchObject({ id: 'thread-3', agent: 'cursor' });
+    expect(threads.list().map((thread) => thread.agent)).toEqual(['cursor', 'codex', 'claude']);
   });
 
   it('changes an empty thread’s agent under the same ID, then locks it on the first accepted prompt', async () => {
@@ -235,29 +262,32 @@ describe('Threads', () => {
     await run(threads.connect(view.post));
 
     await run(threads.setAgent('thread-1', 'codex'));
-    expect(threads.current?.info).toMatchObject({ id: 'thread-1', agent: 'codex' });
+    expect(threads.shown()).toMatchObject({ id: 'thread-1', agent: 'codex' });
     expect(threads.list()).toHaveLength(1);
     expect(made[0].disposed).toBe(true);
     expect(historyOf(view.messages)).toMatchObject({ thread: { id: 'thread-1', agent: 'codex' }, model: null });
 
     await run(threads.prompt('thread-1', 'First'));
     await run(threads.setAgent('thread-1', 'cursor'));
-    expect(threads.current?.info.agent).toBe('codex');
+    expect(threads.shown()?.agent).toBe('codex');
   });
 
   it('applies model changes between prompts and keeps the selection in history', async () => {
     const { threads, made, run } = setup();
     const view = webview();
     await run(threads.connect(view.post));
-    await run(threads.setModel('thread-1', 'model-a'));
+    await run(threads.setModel('thread-1', 'claude', 'model-a'));
     expect(made[0].models).toEqual(['model-a']);
-    expect(threads.current?.selectedModel).toBe('model-a');
+    expect(view.messages.at(-1)).toEqual({ type: 'model', threadId: 'thread-1', model: 'model-a' });
+    // A request made before the thread's agent changed is ignored.
+    await run(threads.setModel('thread-1', 'codex', 'gpt-6'));
+    expect(made[0].models).toEqual(['model-a']);
 
     await run(threads.prompt('thread-1', 'First'));
-    await run(threads.setModel('thread-1', 'model-b'));
+    await run(threads.setModel('thread-1', 'claude', 'model-b'));
     expect(made[0].models).toEqual(['model-a']);
     await made[0].endTurn();
-    await run(threads.setModel('thread-1', 'model-b'));
+    await run(threads.setModel('thread-1', 'claude', 'model-b'));
     expect(made[0].models).toEqual(['model-a', 'model-b']);
     await run(threads.disconnect(view.post));
     const reopened = webview();
@@ -272,7 +302,7 @@ describe('Threads', () => {
     await run(threads.prompt('thread-1', 'First thread'));
 
     const second = await run(threads.create());
-    expect(second.info.id).toBe('thread-2');
+    expect(second.id).toBe('thread-2');
     expect(historyOf(view.messages)).toMatchObject({ thread: { id: 'thread-2' } });
 
     // The first thread keeps running, but its events no longer reach the webview.
@@ -290,7 +320,7 @@ describe('Threads', () => {
     ]);
     // One branch watch at a time, for the shown thread.
     expect(watching).toEqual(['/work/uni-agent']);
-    expect(threads.list().map((thread) => thread.info.id)).toEqual(['thread-2', 'thread-1']);
+    expect(threads.list().map((thread) => thread.id)).toEqual(['thread-2', 'thread-1']);
   });
 
   it('replays the current thread to a webview that reconnects after the sidebar was hidden', async () => {
@@ -357,7 +387,7 @@ describe('Threads', () => {
     await run(threads.connect(view.post));
     await run(threads.create('codex'));
 
-    expect(await run(threads.submitSidebar(view.post, 'thread-1', 'stale'))).toEqual({ status: 'rejected', reason: 'stale' });
+    expect(await run(threads.submit(view.post, 'thread-1', 'stale'))).toEqual({ status: 'rejected', reason: 'stale' });
     expect(made[0].prompts).toHaveLength(0);
     expect(await run(threads.prompt('thread-1', 'intentional background'))).toEqual({ status: 'accepted' });
     expect(made[0].prompts[0][0].text).toBe('intentional background');
@@ -375,7 +405,7 @@ describe('Threads', () => {
     await run(threads.respond('thread-9', 'permission-1', 'allow'));
 
     expect(made[0].answers).toEqual([['permission-1', 'allow']]);
-    expect(threads.list().some((thread) => thread.needsApproval)).toBe(false);
+    expect(threads.list().some((thread) => thread.status === 'needs_approval')).toBe(false);
   });
 
   it('starts threads in Auto-edit and switches the named thread mid-thread, telling its webview', async () => {
@@ -408,7 +438,7 @@ describe('Threads', () => {
   });
 
   it('switches to Full auto once the workspace has opted in', async () => {
-    const { threads, made, run } = setup(true);
+    const { threads, made, run } = setup({ optedIn: true });
     await run(threads.connect(webview().post));
 
     await run(threads.setMode('thread-1', 'full_auto'));
@@ -433,7 +463,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 describe('Threads across reloads', () => {
   it('restores stored threads without starting their agents, and resumes the session with the next prompt', async () => {
     const store = memoryStore();
-    const first = setup(false, undefined, store);
+    const first = setup({ store });
     await first.run(first.threads.connect(webview().post));
     await first.run(first.threads.prompt('thread-1', 'Fix the build'));
     await first.made[0].say('Done.');
@@ -442,9 +472,9 @@ describe('Threads across reloads', () => {
     await first.run(first.threads.create('codex'));
     await first.close();
 
-    const reloaded = setup(false, undefined, store);
-    expect(reloaded.threads.list().map((thread) => [thread.info, thread.title, thread.status])).toEqual([
-      [{ id: 'thread-1', agent: 'claude', workspace: 'uni-agent' }, 'Fix the build', 'idle'],
+    const reloaded = setup({ store });
+    expect(reloaded.threads.list().map((thread) => [thread.id, thread.agent, thread.workspace.name, thread.title, thread.status])).toEqual([
+      ['thread-1', 'claude', 'uni-agent', 'Fix the build', 'idle'],
     ]);
     const view = webview();
     await reloaded.run(reloaded.threads.connect(view.post));
@@ -455,7 +485,7 @@ describe('Threads across reloads', () => {
     expect(history).toMatchObject({ readOnly: null, events: [expect.anything(), { event: { update: { content: { text: 'Done.' } } } }, expect.anything()] });
     expect(reloaded.made).toEqual([]);
 
-    expect(await reloaded.run(reloaded.threads.submitSidebar(view.post, 'thread-1', 'And the tests'))).toEqual({ status: 'accepted' });
+    expect(await reloaded.run(reloaded.threads.submit(view.post, 'thread-1', 'And the tests'))).toEqual({ status: 'accepted' });
     await settle();
     expect(reloaded.made).toHaveLength(1);
     expect(reloaded.made[0].resumed).toBe('session-1');
@@ -465,13 +495,13 @@ describe('Threads across reloads', () => {
 
   it('makes a thread read-only when its session cannot be resumed, and keeps it read-only after the next reload', async () => {
     const store = memoryStore();
-    const first = setup(false, undefined, store);
+    const first = setup({ store });
     await first.run(first.threads.connect(webview().post));
     await first.run(first.threads.prompt('thread-1', 'Hello'));
     await first.made[0].endTurn();
     await first.close();
 
-    const reloaded = setup(false, undefined, store, false);
+    const reloaded = setup({ store, resumable: false });
     const view = webview();
     await reloaded.run(reloaded.threads.connect(view.post));
     await reloaded.run(reloaded.threads.prompt('thread-1', 'Again'));
@@ -484,7 +514,7 @@ describe('Threads across reloads', () => {
     expect(reloaded.made).toHaveLength(1);
     await reloaded.close();
 
-    const again = setup(false, undefined, store);
+    const again = setup({ store });
     const next = webview();
     await again.run(again.threads.connect(next.post));
     expect(historyOf(next.messages)).toMatchObject({ readOnly: 'Session can’t be resumed — start a new thread.' });
@@ -493,7 +523,7 @@ describe('Threads across reloads', () => {
 
   it('ends a turn a reload cut off as interrupted, and the thread takes the next prompt', async () => {
     const store = memoryStore();
-    const first = setup(false, undefined, store);
+    const first = setup({ store });
     await first.run(first.threads.connect(webview().post));
     await first.run(first.threads.prompt('thread-1', 'Long job'));
     await first.made[0].say('Halfway');
@@ -501,7 +531,7 @@ describe('Threads across reloads', () => {
     // without the turn ending: its scope is never closed.
     await first.made[0].askPermission('request-1');
 
-    const reloaded = setup(false, undefined, store);
+    const reloaded = setup({ store });
     const view = webview();
     await reloaded.run(reloaded.threads.connect(view.post));
     const history = historyOf(view.messages);
@@ -516,20 +546,24 @@ describe('Threads across reloads', () => {
 
   it('restores the model and mode, but Full auto only while the workspace still allows it', async () => {
     const store = memoryStore();
-    const first = setup(true, undefined, store);
+    const first = setup({ optedIn: true, store });
     await first.run(first.threads.connect(webview().post));
-    await first.run(first.threads.setModel('thread-1', 'claude-sonnet-4-6'));
+    await first.run(first.threads.setModel('thread-1', 'claude', 'claude-sonnet-4-6'));
     await first.run(first.threads.setMode('thread-1', 'full_auto'));
     await first.run(first.threads.prompt('thread-1', 'Go'));
     await first.made[0].endTurn();
     await first.close();
 
-    const allowed = setup(true, undefined, store);
-    expect(allowed.threads.list()[0]).toMatchObject({ mode: 'full_auto', selectedModel: 'claude-sonnet-4-6' });
+    const allowed = setup({ optedIn: true, store });
+    const allowedView = webview();
+    await allowed.run(allowed.threads.connect(allowedView.post));
+    expect(historyOf(allowedView.messages)).toMatchObject({ mode: 'full_auto', model: 'claude-sonnet-4-6' });
     await allowed.close();
 
-    const refused = setup(false, undefined, store);
-    expect(refused.threads.list()[0]).toMatchObject({ mode: 'auto_edit', selectedModel: 'claude-sonnet-4-6' });
+    const refused = setup({ store });
+    const refusedView = webview();
+    await refused.run(refused.threads.connect(refusedView.post));
+    expect(historyOf(refusedView.messages)).toMatchObject({ mode: 'auto_edit', model: 'claude-sonnet-4-6' });
     await refused.run(refused.threads.prompt('thread-1', 'Go on'));
     await settle();
     expect(refused.made[0].modes).toEqual(['auto_edit']);
@@ -537,7 +571,7 @@ describe('Threads across reloads', () => {
 
   it('archives a thread out of the window, keeps it stored, and brings it back', async () => {
     const store = memoryStore();
-    const first = setup(false, undefined, store);
+    const first = setup({ store });
     const view = webview();
     await first.run(first.threads.connect(view.post));
     await first.run(first.threads.prompt('thread-1', 'Keep me'));
@@ -547,27 +581,27 @@ describe('Threads across reloads', () => {
 
     await first.run(first.threads.archive('thread-2'));
     expect(first.made[1].disposed).toBe(true);
-    expect(first.threads.list().map((thread) => thread.info.id)).toEqual(['thread-1']);
+    expect(first.threads.list().map((thread) => thread.id)).toEqual(['thread-1']);
     expect(first.threads.archived().map((thread) => [thread.id, thread.title])).toEqual([['thread-2', 'Me too']]);
     // The archived thread was shown, so the sidebar moved on to the next one.
     expect(historyOf(view.messages)).toMatchObject({ thread: { id: 'thread-1' } });
     await first.close();
 
-    const reloaded = setup(false, undefined, store);
-    expect(reloaded.threads.list().map((thread) => thread.info.id)).toEqual(['thread-1']);
+    const reloaded = setup({ store });
+    expect(reloaded.threads.list().map((thread) => thread.id)).toEqual(['thread-1']);
     expect(reloaded.threads.archived().map((thread) => thread.id)).toEqual(['thread-2']);
 
     const next = webview();
     await reloaded.run(reloaded.threads.connect(next.post));
     await reloaded.run(reloaded.threads.unarchive('thread-2'));
     expect(reloaded.threads.archived()).toEqual([]);
-    expect(reloaded.threads.list().map((thread) => thread.info.id)).toEqual(['thread-2', 'thread-1']);
+    expect(reloaded.threads.list().map((thread) => thread.id)).toEqual(['thread-2', 'thread-1']);
     expect(historyOf(next.messages)).toMatchObject({ thread: { id: 'thread-2' }, events: [{ event: { type: 'turn_started' } }, { event: { type: 'turn_ended', stopReason: 'end_turn' } }] });
   });
 
   it('deletes threads, archived or not, from the window and the store', async () => {
     const store = memoryStore();
-    const first = setup(false, undefined, store);
+    const first = setup({ store });
     const view = webview();
     await first.run(first.threads.connect(view.post));
     await first.run(first.threads.prompt('thread-1', 'One'));
@@ -580,11 +614,11 @@ describe('Threads across reloads', () => {
     expect(await first.run(first.threads.remove('thread-9'))).toBe(false);
     expect(first.threads.archived()).toEqual([]);
     // Nothing was left to show, so the connected sidebar was given a new thread.
-    expect(first.threads.list().map((thread) => thread.info.id)).toEqual(['thread-3']);
+    expect(first.threads.list().map((thread) => thread.id)).toEqual(['thread-3']);
     expect(historyOf(view.messages)).toMatchObject({ thread: { id: 'thread-3' } });
     await first.close();
 
-    const reloaded = setup(false, undefined, store);
+    const reloaded = setup({ store });
     expect(reloaded.threads.list()).toEqual([]);
     expect(reloaded.threads.archived()).toEqual([]);
   });
@@ -592,14 +626,14 @@ describe('Threads across reloads', () => {
   it('makes a restored worktree thread read-only when its checkout is gone', async () => {
     const store = memoryStore();
     const worktree = { path: '/nowhere/uni-agent-worktree', branch: 'uni/thread-1', base: 'abc123', repo: '/work/uni-agent' };
-    const journal = Context.get(store, ThreadStore).journal({
-      id: 'thread-1', agent: 'codex', workspace: { cwd: worktree.path, name: 'uni-agent · worktree' }, worktree, mode: 'auto_edit', model: undefined, stored: false,
-    });
-    await Effect.runPromise(journal.record({ type: 'turn_started', turnId: 'turn-1', prompt: [{ type: 'text', text: 'Isolated work' }] }, 1));
+    const record = Context.get(store, ThreadStore).record({ id: 'thread-1', agent: 'codex', workspace: { cwd: worktree.path, name: 'uni-agent · worktree' }, worktree });
+    await Effect.runPromise(record.save({ title: 'Isolated work', sessionId: undefined, mode: 'auto_edit', model: undefined, readOnly: undefined }));
 
-    const { threads } = setup(false, undefined, store);
+    const { threads, run } = setup({ store });
+    const view = webview();
+    await run(threads.connect(view.post));
 
-    expect(threads.list()[0].readOnly).toBe('Its worktree checkout at /nowhere/uni-agent-worktree is gone. Session can’t be resumed — start a new thread.');
-    expect(threads.worktreeOf('thread-1')).toEqual(worktree);
+    expect(threads.list()[0]).toMatchObject({ status: 'read_only', worktree });
+    expect(historyOf(view.messages)).toMatchObject({ readOnly: 'Its worktree checkout at /nowhere/uni-agent-worktree is gone. Session can’t be resumed — start a new thread.' });
   });
 });
