@@ -27,6 +27,8 @@ interface ComposerProps {
   config: SessionConfig | undefined;
   workspace: string | null;
   branch: string | null;
+  /** Why the thread takes no more prompts, if it does not; the input is disabled and says so. */
+  readOnly?: string | null;
 }
 
 /**
@@ -34,7 +36,7 @@ interface ComposerProps {
  * what the agent really runs with; only the mode can be changed from here so far, and the others
  * are disabled.
  */
-export function Composer({ draft, rejection, onDraftChange, onSend, canSend, agentName, agent, agentLocked, onAgentChange, selectedModel, models, modelError, onModelChange, modelBusy, mode, onModeChange, config, workspace, branch }: ComposerProps) {
+export function Composer({ draft, rejection, onDraftChange, onSend, canSend, agentName, agent, agentLocked, onAgentChange, selectedModel, models, modelError, onModelChange, modelBusy, mode, onModeChange, config, workspace, branch, readOnly = null }: ComposerProps) {
   const input = useRef<HTMLTextAreaElement>(null);
   const send = () => {
     if (canSend) {
@@ -51,6 +53,7 @@ export function Composer({ draft, rejection, onDraftChange, onSend, canSend, age
         send();
       }}
     >
+      {readOnly !== null && <p className="composer-read-only" role="status">{readOnly}</p>}
       <div className="composer-box">
         <div className="composer-input-row">
           <textarea
@@ -58,7 +61,8 @@ export function Composer({ draft, rejection, onDraftChange, onSend, canSend, age
             className="composer-input"
             aria-label="Message"
             aria-describedby="composer-hint"
-            placeholder={`Message ${agentName}…`}
+            placeholder={readOnly === null ? `Message ${agentName}…` : 'This thread is read-only'}
+            disabled={readOnly !== null}
             rows={3}
             value={draft}
             onChange={(event) => onDraftChange(event.target.value)}
@@ -87,7 +91,7 @@ export function Composer({ draft, rejection, onDraftChange, onSend, canSend, age
             {!agentLocked && <ChevronDownIcon size={10} className="control-chevron" />}
           </label>
           <label className="control control-model" title="Changing models between prompts resets the prompt cache.">
-            <select className="control-select" aria-label="Model" aria-describedby="model-hint" value={selectedModel ?? ''} disabled={!agent || !!modelError || models === undefined || modelBusy} onChange={(event) => onModelChange(event.target.value || null)}>
+            <select className="control-select" aria-label="Model" aria-describedby="model-hint" value={selectedModel ?? ''} disabled={!agent || !!modelError || models === undefined || modelBusy || readOnly !== null} onChange={(event) => onModelChange(event.target.value || null)}>
               <option value="">Default model</option>
               {models?.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
             </select>
@@ -97,7 +101,7 @@ export function Composer({ draft, rejection, onDraftChange, onSend, canSend, age
           <span className="spacer" />
           <SettingControl name="Reasoning" value="Default" />
           <span className="control-separator" aria-hidden="true" />
-          <ModeControl mode={mode} onChange={onModeChange} agentName={agentName} config={config} />
+          <ModeControl mode={mode} onChange={readOnly === null ? onModeChange : undefined} agentName={agentName} config={config} />
         </div>
         <div className="control-row control-row-workspace" role="group" aria-label="Workspace">
           <SettingControl name="Workspace" value={workspace ?? 'No folder open'} icon={<FolderIcon size={13} />} />

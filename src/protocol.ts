@@ -30,7 +30,7 @@ export const ThreadInfo = Schema.Struct({
 });
 export type ThreadInfo = typeof ThreadInfo.Type;
 
-export const PromptRejection = Schema.Literal('busy', 'stale', 'empty', 'unknown');
+export const PromptRejection = Schema.Literal('busy', 'stale', 'empty', 'unknown', 'read_only');
 export type PromptRejection = typeof PromptRejection.Type;
 
 export const ModelDiscoveryFailure = Schema.Struct({ _tag: Schema.Literal('ModelDiscoveryFailed'), message: Schema.String });
@@ -38,8 +38,18 @@ export const ModelDiscoveryFailure = Schema.Struct({ _tag: Schema.Literal('Model
 /** Messages the extension posts to the sidebar webview. */
 export const ExtensionMessage = Schema.Union(
   // The thread to show and everything it has seen so far; replaces the webview's state. Sent on
-  // every `ready` and whenever the sidebar switches thread.
-  Schema.Struct({ type: Schema.Literal('history'), thread: ThreadInfo, mode: Mode, model: Schema.NullOr(Schema.String), events: Schema.Array(ThreadEvent) }),
+  // every `ready` and whenever the sidebar switches thread. `readOnly` says why the thread takes
+  // no more prompts, if it does not.
+  Schema.Struct({
+    type: Schema.Literal('history'),
+    thread: ThreadInfo,
+    mode: Mode,
+    model: Schema.NullOr(Schema.String),
+    readOnly: Schema.NullOr(Schema.String),
+    events: Schema.Array(ThreadEvent),
+  }),
+  // The thread became read-only, for example because its session could not be resumed.
+  Schema.Struct({ type: Schema.Literal('read_only'), threadId: Schema.String, reason: Schema.String }),
   Schema.Struct({ type: Schema.Literal('event'), threadId: Schema.String, ...ThreadEvent.fields }),
   Schema.Union(
     Schema.Struct({ type: Schema.Literal('prompt_result'), threadId: Schema.String, submissionId: Schema.String, status: Schema.Literal('accepted') }),

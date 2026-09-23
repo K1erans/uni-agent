@@ -4,6 +4,18 @@
 
 ### Added
 
+- Threads survive reloads. Each workspace keeps its threads in a SQLite database (`node:sqlite`)
+  in its extension storage: a thread is stored from its first prompt, with one row per finished
+  message, thought or tool call (streaming deltas stay in memory). After a reload, Thread
+  History lists the stored threads, a thread's history shows without starting its agent, and
+  the next message resumes the native session: Claude by session ID, Codex with
+  `thread/resume`, Cursor with `session/load`. A session that can't be resumed makes the
+  thread read-only instead of starting a new one; a turn a reload cut off is shown as
+  interrupted. With no folder open, threads stay in memory.
+- **Archive Thread** and **Delete Thread…**, in the sidebar's `···` menu and on each thread in
+  Thread History, which also lists the archived threads.
+- In a multi-root workspace, a new thread asks which folder it works in.
+
 - Tool calls in the thread: each one a collapsible item with its input, its output and its status
   (waiting, running, done, failed), for Claude, Codex and Cursor alike.
 - Command approvals: when an agent asks permission, the thread shows an inline card on the tool

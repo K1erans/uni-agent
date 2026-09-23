@@ -592,6 +592,15 @@ button {
   background: var(--ua-composer-bg);
 }
 
+.composer-read-only {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--ua-composer-border);
+  border-radius: 8px;
+  color: var(--ua-hint);
+  font-size: 12px;
+}
+
 .composer-box:focus-within {
   border-color: var(--ua-composer-focus-border);
   box-shadow: 0 0 0 2px var(--ua-composer-focus-ring);

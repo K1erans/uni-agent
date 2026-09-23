@@ -20,6 +20,8 @@ export interface ModeSetup {
   readonly mode?: Mode;
   readonly model?: string;
   readonly settings?: Layer.Layer<ModeSettings>;
+  /** A stored session for the adapter to resume. */
+  readonly resume?: string;
 }
 
 /**
@@ -116,7 +118,7 @@ export function setupAdapter(
   processes: ReadonlyArray<readonly TrafficLine[]>,
   find: (name: string) => Option.Option<string> = (name) => Option.some(`/usr/local/bin/${name}`),
   answer?: Answer,
-  { mode = DEFAULT_MODE, model, settings = ModeSettings.none }: ModeSetup = {}
+  { mode = DEFAULT_MODE, model, settings = ModeSettings.none, resume }: ModeSetup = {}
 ) {
   const events: AgentEvent[] = [];
   const spawned: StdioCommand[] = [];
@@ -132,7 +134,7 @@ export function setupAdapter(
   // The sink reaches the adapter to answer its asks, and only ever runs once it has been built.
   let built: AgentAdapter | undefined;
   built = Effect.runSync(
-    make({ cwd: '/workspace', executablePath: Option.none(), mode, model, onEvent: recordingSink(events, answer, () => built) }).pipe(
+    make({ cwd: '/workspace', executablePath: Option.none(), mode, model, resume, onEvent: recordingSink(events, answer, () => built) }).pipe(
       Scope.extend(scope),
       Effect.provide(services)
     )

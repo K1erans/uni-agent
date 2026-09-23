@@ -13,7 +13,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { Context, type Deferred, Effect, Layer, Option, Queue, Runtime, Schema, type Scope, Stream } from 'effect';
 import { Ids } from '../../ids';
-import { ModeChangeFailed, ModelChangeFailed, notSignedInMessage, type AdapterOptions } from '../adapter';
+import { ModeChangeFailed, ModelChangeFailed, notSignedInMessage, resumeFailedMessage, type AdapterOptions } from '../adapter';
 import { BaseAdapter } from '../baseAdapter';
 import type { AgentErrorCode, ContentBlock, StopReason, ToolCall, ToolCallStatus } from '../events';
 import { Executables } from '../findExecutable';
@@ -35,6 +35,8 @@ export class ClaudeSdk extends Context.Tag('uni-agent/ClaudeSdk')<ClaudeSdk, { r
 
 const STDERR_TAIL_LINES = 20;
 const NOT_SIGNED_IN_ERRORS = new Set<SDKAssistantMessage['error']>(['authentication_failed', 'oauth_org_not_allowed']);
+/** What Claude says, on stderr or as its exit reason, when asked to resume a session it does not have. */
+const NO_SESSION = /no conversation found/i;
 /** Message types Claude sends only once it has written the session. */
 const SESSION_MESSAGE_TYPES = new Set<SDKMessage['type']>(['stream_event', 'assistant', 'result']);
 
@@ -121,10 +123,11 @@ class Connection {
  * Drives the user's own, unmodified `claude` binary through the Claude Agent SDK. Uni Agent never
  * touches Claude credentials: the binary signs in and authenticates by itself.
  *
- * The session ID is generated here and handed to Claude, so it is known before the first prompt.
- * One long-lived streaming-input query serves every turn; if the process dies, the next prompt
- * starts a new one that resumes the session. The query runs in the adapter's scope, so closing
- * the scope stops it.
+ * The session ID is generated here and handed to Claude, so it is known before the first prompt; a
+ * stored session (`options.resume`) keeps its own. One long-lived streaming-input query serves
+ * every turn; if the process dies, the next prompt starts a new one that resumes the session. A
+ * session Claude no longer has ends the turn with `resume_failed`. The query runs in the adapter's
+ * scope, so closing the scope stops it.
  */
 export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
   readonly agent = 'claude' as const;
@@ -132,7 +135,9 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
 
   private connection: Connection | undefined;
   /** Whether Claude has written the session, so a restart must resume it rather than create it. */
-  private sessionExists = false;
+  private sessionExists: boolean;
+  /** A connection started to resume the session that has not yet heard from Claude. */
+  private resuming: Connection | undefined;
 
   private constructor(
     readonly sessionId: string,
@@ -144,12 +149,13 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
     scope: Scope.Scope
   ) {
     super(options, executables, ids, modeSettings, scope);
+    this.sessionExists = options.resume !== undefined;
   }
 
   static make(options: AdapterOptions): Effect.Effect<ClaudeAdapter, never, ClaudeSdk | Executables | Ids | ModeSettings | Scope.Scope> {
     return Effect.gen(function* () {
       const ids = yield* Ids;
-      const adapter = new ClaudeAdapter(yield* ids.next, options, yield* ClaudeSdk, yield* Executables, ids, yield* ModeSettings, yield* Effect.scope);
+      const adapter = new ClaudeAdapter(options.resume ?? (yield* ids.next), options, yield* ClaudeSdk, yield* Executables, ids, yield* ModeSettings, yield* Effect.scope);
       yield* adapter.emit({ type: 'session_started', agent: adapter.agent, sessionId: adapter.sessionId });
       yield* adapter.start();
       return adapter;
@@ -249,6 +255,7 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
       }
       const connection = yield* Connection.open(this.sdk.query, connectionOptions);
       this.connection = connection;
+      this.resuming = this.sessionExists ? connection : undefined;
       yield* Effect.logDebug(`Started Claude Code (${executable}) for session ${this.sessionId}`);
       yield* Effect.forkIn(this.consume(connection), this.scope);
       return connection;
@@ -269,11 +276,19 @@ export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
       this.connection = undefined;
       yield* connection.close();
       const stderr = connection.stderr();
+      const turn = this.turn;
+      // A resume Claude refused would fail the same way every time; a new session is never started instead.
+      if (this.resuming === connection && turn && NO_SESSION.test(`${failure}\n${stderr}`)) {
+        this.resuming = undefined;
+        yield* turn.reportError('resume_failed', resumeFailedMessage('claude', stderr || failure));
+        return yield* this.endTurn(turn, 'error');
+      }
       yield* this.crashed(failure + (stderr ? `\n\n${stderr}` : ''));
     });
   }
 
   private handle(message: SDKMessage): Effect.Effect<void> {
+    this.resuming = undefined;
     if (SESSION_MESSAGE_TYPES.has(message.type)) {
       this.sessionExists = true;
     }

@@ -1,7 +1,7 @@
 import { Option, Schema } from 'effect';
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import type { AgentKind, Mode } from '../../src/agents/events';
-import { ExtensionMessage, type WebviewMessage } from '../../src/protocol';
+import { ExtensionMessage, type PromptRejection, type WebviewMessage } from '../../src/protocol';
 import { Composer } from './Composer';
 import { AGENT_NAMES } from './labels';
 import { ThreadHeading } from './ThreadHeading';
@@ -76,8 +76,8 @@ export function App({ post, drafts }: AppProps) {
   /** Posts a prompt to the shown thread, unless a turn is running or no thread is shown yet. */
   const sendPrompt = useCallback(
     (text: string) => {
-      const { thread, running } = latest.current;
-      if (!thread || running || !text.trim()) {
+      const { thread, running, readOnly } = latest.current;
+      if (!thread || running || readOnly !== null || !text.trim()) {
         return;
       }
       const submissionId = `submission-${++nextSubmission.current}`;
@@ -144,7 +144,8 @@ export function App({ post, drafts }: AppProps) {
           sendPrompt(draft);
         }}
         rejection={threadId === undefined ? undefined : rejections.get(threadId)}
-        canSend={state.thread !== undefined && !state.running && draft.trim() !== ''}
+        canSend={state.thread !== undefined && !state.running && state.readOnly === null && draft.trim() !== ''}
+        readOnly={state.readOnly}
         agentName={agentName}
         agent={state.thread?.agent}
         agentLocked={state.running || state.items.some((item) => item.kind === 'turn')}
@@ -164,12 +165,13 @@ export function App({ post, drafts }: AppProps) {
   );
 }
 
-function rejectionReason(reason: 'busy' | 'stale' | 'empty' | 'unknown'): string {
+function rejectionReason(reason: PromptRejection): string {
   switch (reason) {
     case 'busy': return 'This thread is busy. Your message is still here.';
     case 'stale': return 'The shown thread changed. Your message is still here.';
     case 'empty': return 'Enter a message before sending.';
     case 'unknown': return 'This thread is no longer available. Your message is still here.';
+    case 'read_only': return 'This thread is read-only. Start a new thread to go on.';
   }
 }
 

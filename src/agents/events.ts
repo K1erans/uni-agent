@@ -113,8 +113,11 @@ export const SessionUpdate = Schema.Union(
 );
 export type SessionUpdate = typeof SessionUpdate.Type;
 
-/** Why a turn ended. `error` means an {@link AgentError} event explains it. */
-export const StopReason = Schema.Literal('end_turn', 'max_tokens', 'max_turn_requests', 'refusal', 'cancelled', 'error');
+/**
+ * Why a turn ended. `error` means an {@link AgentError} event explains it. `interrupted` is never
+ * reported by an agent: it marks a stored turn that VS Code closed or reloaded before it ended.
+ */
+export const StopReason = Schema.Literal('end_turn', 'max_tokens', 'max_turn_requests', 'refusal', 'cancelled', 'error', 'interrupted');
 export type StopReason = typeof StopReason.Type;
 
 /**
@@ -122,8 +125,9 @@ export type StopReason = typeof StopReason.Type;
  * - `not_signed_in`: the agent's CLI is not signed in; the user must sign in with the CLI itself.
  * - `process_crashed`: the agent process exited or broke its protocol unexpectedly.
  * - `agent_error`: the agent reported an error of its own (API error, rate limit, ...).
+ * - `resume_failed`: the agent could not resume the thread's native session, so the thread is read-only.
  */
-export const AgentErrorCode = Schema.Literal('binary_missing', 'not_signed_in', 'process_crashed', 'agent_error');
+export const AgentErrorCode = Schema.Literal('binary_missing', 'not_signed_in', 'process_crashed', 'agent_error', 'resume_failed');
 export type AgentErrorCode = typeof AgentErrorCode.Type;
 
 export const AgentEvent = Schema.Union(

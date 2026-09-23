@@ -76,6 +76,18 @@
         "icon": "$(history)"
       },
       {
+        "command": "uniAgent.archiveThread",
+        "title": "Archive Thread",
+        "category": "Uni Agent",
+        "icon": "$(archive)"
+      },
+      {
+        "command": "uniAgent.deleteThread",
+        "title": "Delete Thread…",
+        "category": "Uni Agent",
+        "icon": "$(trash)"
+      },
+      {
         "command": "uniAgent.showLogs",
         "title": "Show Logs",
         "category": "Uni Agent"
@@ -107,6 +119,16 @@
           "command": "uniAgent.newWorktreeThread",
           "when": "view == uniAgent.sidebar",
           "group": "1_uniAgent@0.5"
+        },
+        {
+          "command": "uniAgent.archiveThread",
+          "when": "view == uniAgent.sidebar",
+          "group": "0_thread@1"
+        },
+        {
+          "command": "uniAgent.deleteThread",
+          "when": "view == uniAgent.sidebar",
+          "group": "0_thread@2"
         },
         {
           "command": "uniAgent.reviewWorktree",

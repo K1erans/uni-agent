@@ -2,7 +2,7 @@ import { Effect, Exit, Scope } from 'effect';
 import { describe, expect, it, vi } from 'vitest';
 import type { ExtensionMessage } from './protocol';
 import { FakeAdapter } from './testing/fakeAdapter';
-import { makeThread } from './thread';
+import { HISTORY_UNREADABLE, makeThread } from './thread';
 
 /** Opens a thread over a fake adapter; `prompt` lets forked turns start before it returns. */
 function setup() {
@@ -52,6 +52,7 @@ describe('Thread', () => {
       thread: { id: 'thread-1', agent: 'claude', workspace: 'uni-agent' },
       mode: 'auto_edit',
       model: null,
+      readOnly: null,
       events: [
         { event: expect.objectContaining({ type: 'session_started' }), at: expect.any(Number) },
         { event: expect.objectContaining({ type: 'turn_started' }), at: expect.any(Number) },
@@ -157,5 +158,37 @@ describe('Thread', () => {
     const { adapter, close } = setup();
     await close();
     expect(adapter.disposed).toBe(true);
+  });
+
+  it('restores a stored thread lazily, and makes it read-only when some of its history cannot be read', async () => {
+    const made: FakeAdapter[] = [];
+    const scope = Effect.runSync(Scope.make());
+    let loads = 0;
+    const thread = Effect.runSync(
+      makeThread('thread-1', { cwd: '/work/uni-agent', name: 'uni-agent' }, FakeAdapter.maker(made), {
+        restored: {
+          agent: 'codex',
+          sessionId: 'stored-session',
+          title: 'Fix the build',
+          readOnly: undefined,
+          history: Effect.sync(() => {
+            loads++;
+            return { events: [{ event: { type: 'turn_started', turnId: 't1', prompt: [{ type: 'text', text: 'Fix the build' }] }, at: 1 }], complete: false };
+          }),
+        },
+      }).pipe(Scope.extend(scope))
+    );
+    expect([thread.info.agent, thread.title, thread.isEmpty, loads, made.length]).toEqual(['codex', 'Fix the build', false, 0, 0]);
+
+    const sent: ExtensionMessage[] = [];
+    Effect.runSync(thread.attach((message) => Effect.sync(() => void sent.push(message))));
+    Effect.runSync(thread.attach((message) => Effect.sync(() => void sent.push(message))));
+
+    expect(loads).toBe(1);
+    expect(sent.at(-1)).toMatchObject({ type: 'history', readOnly: HISTORY_UNREADABLE, events: [{ event: { type: 'turn_started' } }] });
+    expect(thread.status).toBe('read_only');
+    expect(await Effect.runPromise(thread.prompt('Again'))).toEqual({ status: 'rejected', reason: 'read_only' });
+    expect(made).toEqual([]);
+    await Effect.runPromise(Scope.close(scope, Exit.void));
   });
 });

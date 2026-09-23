@@ -89,6 +89,8 @@ interface SetupOptions {
   refuseSwitch?: boolean;
   /** Settles each permission mode switch; by default it succeeds at once. */
   settleSwitch?: (mode: PermissionMode) => Promise<void>;
+  /** A stored session for the adapter to resume. */
+  resume?: string;
 }
 
 /**
@@ -106,6 +108,7 @@ function setup(
     settings = ModeSettings.none,
     refuseSwitch = false,
     settleSwitch = async () => undefined,
+    resume,
   }: SetupOptions = {}
 ) {
   const events: AgentEvent[] = [];
@@ -139,7 +142,7 @@ function setup(
   // The sink reaches the adapter to answer its asks, and only ever runs once it has been built.
   let built: ClaudeAdapter | undefined;
   built = Effect.runSync(
-    ClaudeAdapter.make({ cwd: '/workspace', executablePath, mode, model, onEvent: recordingSink(events, answer, () => built) }).pipe(
+    ClaudeAdapter.make({ cwd: '/workspace', executablePath, mode, model, resume, onEvent: recordingSink(events, answer, () => built) }).pipe(
       Scope.extend(scope),
       Effect.provide(services)
     )
@@ -448,6 +451,32 @@ describe('ClaudeAdapter', () => {
     expect(await prompt('second')).toBe('end_turn');
     expect(started[1]).toMatchObject({ resume: SESSION_ID });
     expect(started[1].sessionId).toBeUndefined();
+  });
+
+  it('resumes a stored session with its own ID from the first prompt', async () => {
+    const { adapter, events, started, prompt } = setup([[{ dir: 'send', data: userMessage('again') }, { dir: 'recv', data: result() }]], {
+      resume: 'stored-session',
+    });
+
+    expect(adapter.sessionId).toBe('stored-session');
+    expect(events).toEqual([{ type: 'session_started', agent: 'claude', sessionId: 'stored-session' }]);
+    expect(await prompt('again')).toBe('end_turn');
+    expect(started[0]).toMatchObject({ resume: 'stored-session' });
+    expect(started[0].sessionId).toBeUndefined();
+  });
+
+  it('fails the resume, rather than reporting a crash, when Claude no longer has the session', async () => {
+    const { errors, started, prompt } = setup(
+      [[{ dir: 'send', data: userMessage('again') }, { dir: 'exit', error: 'Claude Code process exited with code 1' }]],
+      { resume: 'stored-session' }
+    );
+
+    const turn = prompt('again');
+    started[0].stderr?.('No conversation found with session ID: stored-session\n');
+    expect(await turn).toBe('error');
+    expect(errors()).toEqual([
+      expect.objectContaining({ code: 'resume_failed', message: expect.stringContaining('Session can’t be resumed — start a new thread.') }),
+    ]);
   });
 
   it('starts Claude in the permission mode its mode maps to', async () => {

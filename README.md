@@ -8,8 +8,9 @@ for its lifetime; the model can change within that agent.
 
 The **Uni Agent** sidebar holds a chat thread with Claude Code, Codex or Cursor: type a
 prompt and the reply streams in. The composer shows the model and permission mode the agent
-reports, and the workspace folder and git branch the thread runs in. Tool calls, changing
-the model or permissions, persistence and the agent picker in the composer are still to come.
+reports, and the workspace folder and git branch the thread runs in. Threads are kept per
+workspace: after a reload they come back with their history, and the next message resumes the
+agent's own session.
 
 Uni Agent never stores credentials and discovers models from each agent at runtime, so
 there are no API-key or model settings.
@@ -62,7 +63,8 @@ Press <kbd>F5</kbd> to launch an Extension Development Host with Uni Agent loade
 
 - **Uni Agent: New Thread** — shows a new thread in the sidebar (the `+` in its title bar),
   with the same agent as the shown thread (Claude Code at first). A thread nobody has
-  prompted yet is reused.
+  prompted yet is reused. In a multi-root workspace it asks which folder the thread works in, as
+  does the sidebar when it opens with no thread to show.
 - **Uni Agent: New Thread With Agent…** — asks which agent a new thread talks to; also in
   the sidebar's `···` menu. A stand-in until the composer's agent picker lands.
 - **Uni Agent: New Worktree Thread…** — creates a separate checkout and branch under the
@@ -71,8 +73,15 @@ Press <kbd>F5</kbd> to launch an Extension Development Host with Uni Agent loade
 - **Uni Agent: Review Worktree Changes**, **Open Worktree in New Window**, and
   **Remove Worktree…** — inspect, open, or remove the shown thread's checkout. Removal asks
   whether to keep or discard its branch.
-- **Uni Agent: Thread History** — switches the sidebar to another of this window's threads.
-  Threads last until the window closes; they are not persisted yet.
+- **Uni Agent: Thread History** — switches the sidebar to another thread, each listed with its
+  status (running, needs approval, idle, read-only). The buttons on a thread archive or delete
+  it, and the last entry lists the archived threads; picking one, or its Unarchive button, brings
+  it back.
+- **Uni Agent: Archive Thread**, **Delete Thread…** — archive or delete the shown thread; also
+  in the sidebar's `···` menu. Archiving stops the agent and hides the thread, keeping it.
+  Deleting removes Uni Agent's copy of the thread (the agent's own session files are kept);
+  a worktree thread's checkout is removed with it, after the same confirmation as
+  **Remove Worktree…**.
 - **Uni Agent: Show Logs**, **Uni Agent: Open Settings** — also in the sidebar's `···` menu.
 
 ### Settings

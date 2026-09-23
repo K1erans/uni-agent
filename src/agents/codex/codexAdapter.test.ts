@@ -1,7 +1,7 @@
 import { Effect, Either, Option } from 'effect';
 import { describe, expect, it, vi } from 'vitest';
 import { modeSettings } from '../../testing/modeSettings';
-import { agentRequest, answer, exit, methodNotFound, notification, notify, request, result, setupAdapter } from '../../testing/stdioFixtures';
+import { agentRequest, answer, exit, methodNotFound, notification, notify, request, result, rpcError, setupAdapter } from '../../testing/stdioFixtures';
 import { TurnInProgress } from '../adapter';
 import { CLIENT_INFO } from '../jsonRpcAdapter';
 import type { TrafficLine, WireMessage } from '../traffic';
@@ -425,6 +425,33 @@ describe('CodexAdapter', () => {
     expect(spawned).toHaveLength(2);
     // The thread is the same one, so it is not announced again.
     expect(events.filter((event) => event.type === 'session_started')).toHaveLength(1);
+  });
+
+  it('resumes a stored thread with its first prompt, keeping the model the thread had selected', async () => {
+    const { events, errors, prompt } = setupAdapter(CodexAdapter.make, [[
+      ...handshake(request(3, 'thread/resume', { threadId: THREAD })),
+      request(4, 'turn/start', { threadId: THREAD, input: [{ type: 'text', text: 'again', text_elements: [] }], ...AUTO_EDIT, model: 'gpt-6-astra' }),
+      result(4, { turn: { id: TURN } }),
+      turnCompleted('completed'),
+    ]], undefined, undefined, { resume: THREAD, model: 'gpt-6-astra' });
+
+    expect(await prompt('again')).toBe('end_turn');
+    expect(errors()).toEqual([]);
+    // The stored thread is already known, so it is not announced again.
+    expect(events.filter((event) => event.type === 'session_started')).toEqual([]);
+  });
+
+  it('fails the resume when Codex refuses the stored thread, and never starts another', async () => {
+    const { errors, spawned, prompt } = setupAdapter(CodexAdapter.make, [[
+      ...handshake(request(3, 'thread/resume', { threadId: THREAD })).slice(0, -1),
+      rpcError(3, -32600, 'no rollout found for thread id thread-a'),
+    ]], undefined, undefined, { resume: THREAD });
+
+    expect(await prompt('again')).toBe('error');
+    expect(spawned).toHaveLength(1);
+    expect(errors()).toEqual([
+      expect.objectContaining({ code: 'resume_failed', message: expect.stringContaining('no rollout found for thread id thread-a') }),
+    ]);
   });
 
   it('reports a missing binary in the thread instead of starting Codex', async () => {

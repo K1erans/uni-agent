@@ -311,6 +311,48 @@ describe('CursorAdapter', () => {
     expect(setup.events.filter((event) => event.type === 'session_started')).toHaveLength(1);
   });
 
+  it('loads a stored session with its first prompt', async () => {
+    const setup = setupAdapter(CursorAdapter.make, [[
+      ...initialize,
+      request(2, 'session/load', { sessionId: SESSION, cwd: '/workspace', mcpServers: [] }),
+      chunk('agent_message_chunk', 'history'),
+      result(2, SESSION_CONFIG),
+      prompt(3, 'again'),
+      result(3, { stopReason: 'end_turn' }),
+    ]], undefined, undefined, { resume: SESSION });
+
+    expect(await setup.prompt('again')).toBe('end_turn');
+    expect(setup.errors()).toEqual([]);
+    expect(setup.chunks()).toEqual([]);
+  });
+
+  it('fails the resume, rather than starting a new session, when Cursor cannot load sessions', async () => {
+    const setup = setupAdapter(CursorAdapter.make, [[
+      request(1, 'initialize', {
+        protocolVersion: 1,
+        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+        clientInfo: CLIENT_INFO,
+      }),
+      result(1, { protocolVersion: 1, agentCapabilities: {} }),
+    ]], undefined, undefined, { resume: SESSION });
+
+    expect(await setup.prompt('again')).toBe('error');
+    expect(setup.errors()).toEqual([
+      expect.objectContaining({ code: 'resume_failed', message: expect.stringContaining('Cursor did not offer to load sessions.') }),
+    ]);
+  });
+
+  it('fails the resume when Cursor refuses to load the stored session', async () => {
+    const setup = setupAdapter(CursorAdapter.make, [[
+      ...initialize,
+      request(2, 'session/load', { sessionId: SESSION, cwd: '/workspace', mcpServers: [] }),
+      rpcError(2, -32002, 'Session not found'),
+    ]], undefined, undefined, { resume: SESSION });
+
+    expect(await setup.prompt('again')).toBe('error');
+    expect(setup.errors()).toEqual([expect.objectContaining({ code: 'resume_failed', message: expect.stringContaining('Session not found') })]);
+  });
+
   it('ends a running turn as cancelled when disposed', async () => {
     const setup = setupAdapter(CursorAdapter.make, [[...handshake, prompt(3, 'hi')]]);
 
