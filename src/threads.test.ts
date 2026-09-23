@@ -170,17 +170,6 @@ describe('Threads', () => {
     }
   });
 
-  it('titles a kept thread with its first prompt', async () => {
-    const store = memoryStore();
-    const journal = Context.get(store, ThreadStore).journal({
-      id: 'thread-9', agent: 'claude', workspace: { cwd: '/work/uni-agent', name: 'uni-agent' }, worktree: undefined, mode: 'auto_edit', model: undefined, stored: false,
-    });
-    await Effect.runPromise(journal.keep);
-    await Effect.runPromise(journal.record({ type: 'turn_started', turnId: 't1', prompt: [{ type: 'text', text: 'Late title' }] }, 5));
-
-    expect(Effect.runSync(Context.get(store, ThreadStore).list).map((thread) => thread.title)).toEqual(['Late title']);
-  });
-
   it('creates a thread for the first webview and sends it the thread, then its branch', async () => {
     const { threads, run, watching } = setup();
     const view = webview();
@@ -596,10 +585,8 @@ describe('Threads across reloads', () => {
   it('makes a restored worktree thread read-only when its checkout is gone', async () => {
     const store = memoryStore();
     const worktree = { path: '/nowhere/uni-agent-worktree', branch: 'uni/thread-1', base: 'abc123', repo: '/work/uni-agent' };
-    const journal = Context.get(store, ThreadStore).journal({
-      id: 'thread-1', agent: 'codex', workspace: { cwd: worktree.path, name: 'uni-agent · worktree' }, worktree, mode: 'auto_edit', model: undefined, stored: false,
-    });
-    await Effect.runPromise(journal.record({ type: 'turn_started', turnId: 'turn-1', prompt: [{ type: 'text', text: 'Isolated work' }] }, 1));
+    const record = Context.get(store, ThreadStore).record({ id: 'thread-1', agent: 'codex', workspace: { cwd: worktree.path, name: 'uni-agent · worktree' }, worktree });
+    await Effect.runPromise(record.save({ title: 'Isolated work', sessionId: undefined, mode: 'auto_edit', model: undefined, readOnly: undefined }));
 
     const { threads } = setup(false, undefined, store);
 

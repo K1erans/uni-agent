@@ -5,7 +5,9 @@ import { Context, Effect, Either, Layer, Scope } from 'effect';
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from './agents/events';
 import { Database, type DatabaseError } from './database';
-import { THREAD_STORE_MIGRATIONS, ThreadStore, type JournalledThread } from './threadStore';
+import type { CompactedEvent } from './compaction';
+import type { ThreadFacts } from './thread';
+import { THREAD_STORE_MIGRATIONS, ThreadStore, type RecordedThread } from './threadStore';
 
 /** A store over an in-memory database, with the database itself so a test can inspect or damage rows. */
 function setup() {
@@ -21,35 +23,34 @@ function setup() {
   };
 }
 
-const THREAD: JournalledThread = {
+const THREAD: RecordedThread = {
   id: 'thread-1',
   agent: 'codex',
   workspace: { cwd: '/work/uni-agent', name: 'uni-agent' },
   worktree: undefined,
-  mode: 'auto_edit',
-  model: undefined,
-  stored: false,
 };
 
-const turnStarted = (turnId: string, text = 'Fix the build\nIt fails on CI'): AgentEvent => ({ type: 'turn_started', turnId, prompt: [{ type: 'text', text }] });
+const FACTS: ThreadFacts = { title: 'Fix the build', sessionId: undefined, mode: 'auto_edit', model: undefined, readOnly: undefined };
+
+const turnStarted = (turnId: string, text = 'Fix the build'): AgentEvent => ({ type: 'turn_started', turnId, prompt: [{ type: 'text', text }] });
 const say = (turnId: string, text: string): AgentEvent => ({
   type: 'session_update',
   turnId,
   update: { sessionUpdate: 'agent_message_chunk', messageId: `${turnId}:m`, content: { type: 'text', text } },
 });
+/** The rows a thread appends: one event each, at consecutive positions from `seq`. */
+const rows = (seq: number, ...events: ReadonlyArray<readonly [AgentEvent, number]>): CompactedEvent[] =>
+  events.map(([event, at], index) => ({ seq: seq + index, part: 0, turnId: event.type === 'session_configured' || event.type === 'session_started' ? undefined : event.turnId, event, at }));
 
 describe('ThreadStore', () => {
-  it('stores a thread from its first prompt, with the session the agent opened for it', () => {
+  it('stores a thread when it first saves, and keeps its facts current', () => {
     const { store, run } = setup();
-    const journal = store.journal(THREAD);
-
-    run(journal.setModel('gpt-6'));
+    const record = store.record(THREAD);
     expect(run(store.list)).toEqual([]);
 
-    run(journal.record(turnStarted('turn-1'), 100));
-    // Codex and Cursor name their session once the first turn has opened it.
-    run(journal.record({ type: 'session_started', agent: 'codex', sessionId: 'codex-thread' }, 101));
-    run(journal.setMode('plan'));
+    run(record.save(FACTS));
+    run(record.append(rows(0, [turnStarted('turn-1'), 100])));
+    run(record.save({ ...FACTS, sessionId: 'codex-thread', mode: 'plan', model: 'gpt-6' }));
 
     expect(run(store.list)).toEqual([
       {
@@ -68,66 +69,53 @@ describe('ThreadStore', () => {
     ]);
   });
 
-  it('keeps a session announced before the first prompt, as Claude’s is', () => {
-    const { store, run } = setup();
-    const journal = store.journal({ ...THREAD, agent: 'claude' });
-
-    run(journal.record({ type: 'session_started', agent: 'claude', sessionId: 'claude-session' }, 1));
-    run(journal.record(turnStarted('turn-1'), 2));
-
-    expect(run(store.list)[0]).toMatchObject({ agent: 'claude', sessionId: 'claude-session' });
-  });
-
-  it('gives back the compacted history in order, and adds to it after a restore', () => {
-    const { store, run, rows } = setup();
-    const journal = store.journal(THREAD);
-    run(journal.record(turnStarted('turn-1'), 1));
-    run(journal.record(say('turn-1', 'Hel'), 2));
-    run(journal.record(say('turn-1', 'lo'), 3));
-    run(journal.record({ type: 'turn_ended', turnId: 'turn-1', stopReason: 'end_turn' }, 4));
-
-    // After a reload, the restored thread's journal carries on where the stored rows end.
-    const restored = store.journal({ ...THREAD, stored: true });
-    run(restored.record(turnStarted('turn-2', 'Again'), 5));
-    run(restored.record({ type: 'turn_ended', turnId: 'turn-2', stopReason: 'cancelled' }, 6));
+  it('gives back the appended rows in order, with where the next ones go', () => {
+    const { store, run, rows: query } = setup();
+    const record = store.record(THREAD);
+    run(record.save(FACTS));
+    // Rows replay by position, not by when they were written.
+    run(record.append([{ seq: 0, part: 0, turnId: 'turn-1', event: turnStarted('turn-1'), at: 1 }]));
+    run(record.append([
+      { seq: 2, part: 0, turnId: 'turn-1', event: { type: 'turn_ended', turnId: 'turn-1', stopReason: 'end_turn' }, at: 4 },
+      { seq: 1, part: 0, turnId: 'turn-1', event: say('turn-1', 'Hello'), at: 2 },
+    ]));
 
     expect(run(store.history('thread-1'))).toEqual({
       complete: true,
+      nextSeq: 3,
       events: [
         { event: turnStarted('turn-1'), at: 1 },
         { event: say('turn-1', 'Hello'), at: 2 },
         { event: { type: 'turn_ended', turnId: 'turn-1', stopReason: 'end_turn' }, at: 4 },
-        { event: turnStarted('turn-2', 'Again'), at: 5 },
-        { event: { type: 'turn_ended', turnId: 'turn-2', stopReason: 'cancelled' }, at: 6 },
       ],
     });
-    expect(rows('SELECT id, status FROM turns ORDER BY started_at')).toEqual([
-      { id: 'turn-1', status: 'end_turn' },
-      { id: 'turn-2', status: 'cancelled' },
-    ]);
+    expect(query('SELECT id, status, ended_at FROM turns')).toEqual([{ id: 'turn-1', status: 'end_turn', ended_at: 4 }]);
   });
 
   it('ends a turn a reload cut off as interrupted when it loads, keeping what had finished', () => {
     const { store, run } = setup();
-    const journal = store.journal(THREAD);
-    run(journal.record(turnStarted('turn-1'), 10));
-    run(journal.record(say('turn-1', 'Working on it'), 11));
-    run(journal.record({ type: 'session_update', turnId: 'turn-1', update: { sessionUpdate: 'tool_call', toolCallId: 'c1', title: 'ls', kind: 'execute', status: 'in_progress' } }, 12));
+    const record = store.record(THREAD);
+    run(record.save(FACTS));
+    run(record.append(rows(0, [turnStarted('turn-1'), 10], [say('turn-1', 'Working on it'), 11])));
 
     run(store.load);
 
-    expect(run(store.history('thread-1')).events).toEqual([
-      { event: turnStarted('turn-1'), at: 10 },
-      { event: say('turn-1', 'Working on it'), at: 11 },
-      { event: { type: 'turn_ended', turnId: 'turn-1', stopReason: 'interrupted' }, at: 11 },
-    ]);
+    expect(run(store.history('thread-1'))).toMatchObject({
+      nextSeq: 3,
+      events: [
+        { event: turnStarted('turn-1'), at: 10 },
+        { event: say('turn-1', 'Working on it'), at: 11 },
+        { event: { type: 'turn_ended', turnId: 'turn-1', stopReason: 'interrupted' }, at: 11 },
+      ],
+    });
   });
 
-  it('marks a thread read-only, and archives, restores and deletes it', () => {
-    const { store, run, rows } = setup();
-    const journal = store.journal(THREAD);
-    run(journal.record(turnStarted('turn-1'), 1));
-    run(journal.markReadOnly('Session can’t be resumed — start a new thread.'));
+  it('keeps a read-only thread read-only, and archives, restores and deletes it', () => {
+    const { store, run, rows: query } = setup();
+    const record = store.record(THREAD);
+    run(record.save(FACTS));
+    run(record.append(rows(0, [turnStarted('turn-1'), 1])));
+    run(record.save({ ...FACTS, readOnly: 'Session can’t be resumed — start a new thread.' }));
 
     run(store.setArchived('thread-1', true));
     expect(run(store.list)[0]).toMatchObject({ archived: true, readOnly: 'Session can’t be resumed — start a new thread.' });
@@ -136,20 +124,28 @@ describe('ThreadStore', () => {
 
     run(store.remove('thread-1'));
     expect(run(store.list)).toEqual([]);
-    expect(rows('SELECT count(*) AS n FROM turns')).toEqual([{ n: 0 }]);
-    expect(rows('SELECT count(*) AS n FROM events')).toEqual([{ n: 0 }]);
+    expect(query('SELECT count(*) AS n FROM turns')).toEqual([{ n: 0 }]);
+    expect(query('SELECT count(*) AS n FROM events')).toEqual([{ n: 0 }]);
+  });
+
+  it('keeps who a worktree thread is and where its checkout is', () => {
+    const { store, run } = setup();
+    const worktree = { path: '/storage/thread-1', branch: 'uni/thread-1', base: 'abc123', repo: '/work/uni-agent' };
+    run(store.record({ ...THREAD, worktree }).save({ ...FACTS, title: undefined }));
+
+    expect(run(store.list)[0]).toMatchObject({ worktree, title: undefined });
   });
 
   it('leaves out rows that do not decode, never casting them, and says the history is incomplete', () => {
     const { store, run, exec } = setup();
-    const journal = store.journal(THREAD);
-    run(journal.record(turnStarted('turn-1'), 1));
-    run(journal.record({ type: 'turn_ended', turnId: 'turn-1', stopReason: 'end_turn' }, 2));
+    const record = store.record(THREAD);
+    run(record.save(FACTS));
+    run(record.append(rows(0, [turnStarted('turn-1'), 1], [{ type: 'turn_ended', turnId: 'turn-1', stopReason: 'end_turn' }, 2])));
     exec(`UPDATE events SET payload = '{"type":"from_the_future"}' WHERE seq = 1`);
-    run(store.journal({ ...THREAD, id: 'thread-2' }).record(turnStarted('turn-1'), 3));
+    run(store.record({ ...THREAD, id: 'thread-2' }).save(FACTS));
     exec(`UPDATE threads SET agent = 'gemini' WHERE id = 'thread-2'`);
 
-    expect(run(store.history('thread-1'))).toEqual({ complete: false, events: [{ event: turnStarted('turn-1'), at: 1 }] });
+    expect(run(store.history('thread-1'))).toEqual({ complete: false, nextSeq: 2, events: [{ event: turnStarted('turn-1'), at: 1 }] });
     expect(run(store.list).map((thread) => thread.id)).toEqual(['thread-1']);
   });
 });

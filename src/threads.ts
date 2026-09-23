@@ -162,8 +162,8 @@ export function makeThreads<R>(
           .pipe(Scope.extend(watch));
       });
 
-    const journalFor = (id: string, agent: AgentKind, location: Workspace, mode: Mode, model: string | undefined, stored: boolean) =>
-      store.journal({ id, agent, workspace: location, worktree: worktrees.get(id), mode, model, stored });
+    const recordFor = (id: string, agent: AgentKind, location: Workspace) =>
+      store.record({ id, agent, workspace: location, worktree: worktrees.get(id) });
 
     const openThread = (id: string, agent: AgentKind, where: Workspace, threadScope: Scope.CloseableScope, checkout?: Worktree) =>
       Effect.gen(function* () {
@@ -171,13 +171,9 @@ export function makeThreads<R>(
         if (checkout) {
           worktrees.set(id, checkout);
         }
-        const journal = journalFor(id, agent, location, DEFAULT_MODE, undefined, false);
-        // A worktree thread has a checkout on disk from the start, so it is stored from the start:
+        // A worktree thread has a checkout on disk from the start, so it is kept from the start:
         // otherwise nothing would lead back to the checkout after a reload or an archive.
-        if (checkout) {
-          yield* journal.keep;
-        }
-        const thread = yield* makeThread(id, location, makeAdapter(agent, location), { onChanged, journal })
+        const thread = yield* makeThread(id, location, makeAdapter(agent, location), { onChanged, record: recordFor(id, agent, location), keep: checkout !== undefined })
           .pipe(Scope.extend(threadScope), Effect.provide(context));
         threadScopes.set(id, threadScope);
         threads.unshift(thread);
@@ -199,7 +195,7 @@ export function makeThreads<R>(
           onChanged,
           model: entry.model,
           mode,
-          journal: journalFor(entry.id, entry.agent, entry.workspace, mode, entry.model, true),
+          record: recordFor(entry.id, entry.agent, entry.workspace),
           restored: {
             agent: entry.agent,
             sessionId: entry.sessionId,
@@ -272,7 +268,7 @@ export function makeThreads<R>(
       const next = yield* makeThread(threadId, old.workspace, makeAdapter(agent, old.workspace), {
         onChanged,
         mode: old.mode,
-        journal: journalFor(threadId, agent, old.workspace, old.mode, undefined, false),
+        record: recordFor(threadId, agent, old.workspace),
       }).pipe(Scope.extend(nextScope), Effect.provide(context));
       yield* old.detach();
       threadScopes.set(threadId, nextScope);
