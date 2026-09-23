@@ -1,6 +1,7 @@
 import { Option, Schema } from 'effect';
 import type { WebviewMessage } from '../../src/protocol';
 import type { DraftStore } from './App';
+import type { Transport } from './transport';
 
 interface VsCodeApi {
   postMessage(message: WebviewMessage): void;
@@ -13,7 +14,16 @@ interface VsCodeApi {
 declare function acquireVsCodeApi(): VsCodeApi;
 
 /** The webview's handle to the extension. `acquireVsCodeApi` may only be called once per page. */
-export const vscode = acquireVsCodeApi();
+const vscode = acquireVsCodeApi();
+
+/** Posts through the webview API; the extension's messages arrive as `message` events on the window. */
+export const vscodeTransport: Transport = {
+  send: (message) => vscode.postMessage(message),
+  listen: (onDelivery) => {
+    window.addEventListener('message', onDelivery);
+    return () => window.removeEventListener('message', onDelivery);
+  },
+};
 
 /** What the webview keeps while VS Code disposes it (the sidebar hidden): unsent drafts by thread. */
 const WebviewState = Schema.Struct({ drafts: Schema.Array(Schema.Tuple(Schema.String, Schema.String)) });

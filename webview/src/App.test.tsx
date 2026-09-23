@@ -1,16 +1,37 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import type { AgentEvent, Mode } from '../../src/agents/events';
-import type { ExtensionMessage, ThreadInfo } from '../../src/protocol';
-import { App, type Drafts } from './App';
+import type { ExtensionMessage, ThreadInfo, WebviewMessage } from '../../src/protocol';
+import { App, type DraftStore, type Drafts } from './App';
+import { createMemoryTransport, type MemoryTransport } from './memoryTransport';
+import { createSidebarClient } from './sidebarClient';
 import type { TurnItem } from './threadState';
 import { Transcript } from './Transcript';
 
+/** The extension's side of the transport the sidebar was last mounted on. */
+let extension: MemoryTransport;
+
+/** Renders the sidebar on a fresh in-memory transport, whose extension side the helpers below play. */
+function mount(drafts?: DraftStore) {
+  extension = createMemoryTransport();
+  return render(<App client={createSidebarClient(extension)} drafts={drafts} />);
+}
+
 function receive(message: ExtensionMessage) {
   act(() => {
-    window.dispatchEvent(new MessageEvent('message', { data: message }));
+    extension.deliver(message);
   });
 }
+
+/** Answers a prompt, and waits for the sidebar to act on the answer, which it receives as a promise. */
+async function answer(message: Extract<ExtensionMessage, { type: 'prompt_result' }>) {
+  await act(async () => {
+    extension.deliver(message);
+  });
+}
+
+const sent = (type: WebviewMessage['type']) => extension.sent.filter((message) => message.type === type);
+const lastSent = () => extension.sent.at(-1);
 
 const THREAD: ThreadInfo = { id: 'thread-1', agent: 'claude', workspace: 'uni-agent' };
 
@@ -39,7 +60,7 @@ const type = (text: string) => fireEvent.change(input(), { target: { value: text
 
 describe('App', () => {
   it('shows a new thread’s heading and an empty conversation above the composer', () => {
-    render(<App post={() => {}} />);
+    mount();
     open();
 
     expect(screen.getByRole('heading', { name: 'New thread' })).toBeTruthy();
@@ -52,7 +73,7 @@ describe('App', () => {
   });
 
   it('names the thread’s agent, whichever it is', () => {
-    render(<App post={() => {}} />);
+    mount();
     open([], { id: 'thread-2', agent: 'codex', workspace: 'uni-agent' });
 
     expect(screen.getByRole<HTMLSelectElement>('combobox', { name: 'Agent' }).value).toBe('codex');
@@ -60,20 +81,19 @@ describe('App', () => {
   });
 
   it('offers providers before a prompt, filters models, and locks the provider after the prompt', () => {
-    const post = vi.fn();
-    render(<App post={post} />);
+    mount();
     open();
     type('Keep this draft');
     const agent = screen.getByRole<HTMLSelectElement>('combobox', { name: 'Agent' });
     fireEvent.change(agent, { target: { value: 'cursor' } });
-    expect(post).toHaveBeenLastCalledWith({ type: 'set_agent', threadId: 'thread-1', agent: 'cursor' });
+    expect(lastSent()).toEqual({ type: 'set_agent', threadId: 'thread-1', agent: 'cursor' });
     open([], { ...THREAD, agent: 'cursor' });
     expect(input().value).toBe('Keep this draft');
     receive({ type: 'models', threadId: 'thread-1', agent: 'cursor', models: [{ id: 'cursor-model', name: 'Cursor Model' }], error: null });
     const model = screen.getByRole<HTMLSelectElement>('combobox', { name: 'Model' });
     expect(model.disabled).toBe(false);
     fireEvent.change(model, { target: { value: 'cursor-model' } });
-    expect(post).toHaveBeenLastCalledWith({ type: 'set_model', threadId: 'thread-1', agent: 'cursor', model: 'cursor-model' });
+    expect(lastSent()).toEqual({ type: 'set_model', threadId: 'thread-1', agent: 'cursor', model: 'cursor-model' });
     event(turnStarted('Keep this draft'));
     expect(agent.disabled).toBe(true);
     expect(model.disabled).toBe(true);
@@ -82,8 +102,7 @@ describe('App', () => {
   });
 
   it('shows discovery failure and keeps the default model available for a prompt', () => {
-    const post = vi.fn();
-    render(<App post={post} />);
+    mount();
     open();
     receive({ type: 'models', threadId: 'thread-1', agent: 'claude', models: [], error: { _tag: 'ModelDiscoveryFailed', message: 'CLI unavailable' } });
     expect(screen.getByRole('alert').textContent).toContain('CLI unavailable');
@@ -91,65 +110,60 @@ describe('App', () => {
     type('Try the default');
     expect(sendButton().disabled).toBe(false);
     fireEvent.click(sendButton());
-    expect(post).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'prompt', text: 'Try the default' }));
+    expect(lastSent()).toEqual(expect.objectContaining({ type: 'prompt', text: 'Try the default' }));
   });
 
   it('cannot send before the extension has sent a thread', () => {
-    const post = vi.fn();
-    render(<App post={post} />);
+    mount();
 
     type('Hello');
     fireEvent.keyDown(input(), { key: 'Enter' });
 
     expect(sendButton().disabled).toBe(true);
-    expect(post).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'prompt' }));
+    expect(sent('prompt')).toHaveLength(0);
   });
 
-  it('keeps the draft until the thread accepts it', () => {
-    const post = vi.fn();
-    render(<App post={post} />);
+  it('keeps the draft until the thread accepts it', async () => {
+    mount();
     open();
 
     type('Hello');
     expect(sendButton().disabled).toBe(false);
     fireEvent.click(sendButton());
 
-    expect(post).toHaveBeenCalledWith({ type: 'prompt', threadId: 'thread-1', submissionId: 'submission-1', text: 'Hello' });
+    expect(extension.sent).toContainEqual({ type: 'prompt', threadId: 'thread-1', submissionId: 'submission-1', text: 'Hello' });
     expect(input().value).toBe('Hello');
-    receive({ type: 'prompt_result', threadId: 'thread-1', submissionId: 'submission-1', status: 'accepted' });
+    await answer({ type: 'prompt_result', threadId: 'thread-1', submissionId: 'submission-1', status: 'accepted' });
     expect(input().value).toBe('');
   });
 
-  it('preserves a rejected draft and shows the reason beside it', () => {
-    const post = vi.fn();
-    render(<App post={post} />);
+  it('preserves a rejected draft and shows the reason beside it', async () => {
+    mount();
     open();
     type('Try again');
     fireEvent.click(sendButton());
 
-    receive({ type: 'prompt_result', threadId: 'thread-1', submissionId: 'submission-1', status: 'rejected', reason: 'busy' });
+    await answer({ type: 'prompt_result', threadId: 'thread-1', submissionId: 'submission-1', status: 'rejected', reason: 'busy' });
     expect(input().value).toBe('Try again');
     expect(screen.getByRole('alert').textContent).toContain('busy');
     expect(sendButton().disabled).toBe(false);
   });
 
   it('sends on Enter, but not on Shift+Enter or while an IME composition is open', () => {
-    const post = vi.fn();
-    render(<App post={post} />);
+    mount();
     open();
     type('こんにちは');
 
     fireEvent.keyDown(input(), { key: 'Enter', isComposing: true });
     fireEvent.keyDown(input(), { key: 'Enter', shiftKey: true });
-    expect(post).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'prompt' }));
+    expect(sent('prompt')).toHaveLength(0);
 
     fireEvent.keyDown(input(), { key: 'Enter' });
-    expect(post).toHaveBeenCalledWith(expect.objectContaining({ type: 'prompt', threadId: 'thread-1', text: 'こんにちは' }));
+    expect(extension.sent).toContainEqual(expect.objectContaining({ type: 'prompt', threadId: 'thread-1', text: 'こんにちは' }));
   });
 
   it('blocks sending from the moment a prompt is posted, before the turn starts', () => {
-    const post = vi.fn();
-    render(<App post={post} />);
+    mount();
     open();
 
     type('First');
@@ -158,7 +172,7 @@ describe('App', () => {
 
     expect(sendButton().disabled).toBe(true);
     fireEvent.keyDown(input(), { key: 'Enter' });
-    expect(post.mock.calls.filter(([message]) => message.type === 'prompt')).toHaveLength(1);
+    expect(sent('prompt')).toHaveLength(1);
     expect(input().value).toBe('Second');
 
     event(turnStarted('First'));
@@ -167,7 +181,7 @@ describe('App', () => {
   });
 
   it('streams the reply in, titles the thread, and blocks sending until the turn ends', () => {
-    render(<App post={() => {}} />);
+    mount();
     open();
 
     event(turnStarted('Count\nto two'), 1_000);
@@ -188,8 +202,7 @@ describe('App', () => {
   });
 
   it('copies a reply and retries the latest prompt', () => {
-    const post = vi.fn();
-    render(<App post={post} />);
+    mount();
     open();
     event(turnStarted('Earlier', 't0'));
     event(turnEnded('t0'));
@@ -202,16 +215,16 @@ describe('App', () => {
     expect(screen.getAllByRole('button', { name: 'Retry prompt' })).toHaveLength(1);
 
     fireEvent.click(screen.getByRole('button', { name: 'Copy response' }));
-    expect(post).toHaveBeenLastCalledWith({ type: 'copy', text: '1 2 3' });
+    expect(lastSent()).toEqual({ type: 'copy', text: '1 2 3' });
     expect(screen.getByText('Copied')).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: 'Retry prompt' }));
-    expect(post).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'prompt', threadId: 'thread-1', text: 'Count' }));
+    expect(lastSent()).toEqual(expect.objectContaining({ type: 'prompt', threadId: 'thread-1', text: 'Count' }));
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Retry prompt' }).disabled).toBe(true);
   });
 
   it('shows discovered models and the agent session settings', () => {
-    render(<App post={() => {}} />);
+    mount();
     open();
 
     expect(screen.getByRole<HTMLSelectElement>('combobox', { name: 'Model' }).disabled).toBe(true);
@@ -229,15 +242,14 @@ describe('App', () => {
   });
 
   it('asks the extension to switch the shown thread’s mode, and shows the mode it reports', () => {
-    const post = vi.fn();
-    render(<App post={post} />);
+    mount();
     expect(modeSelect().disabled).toBe(true);
     open();
     expect(modeSelect().value).toBe('auto_edit');
     expect(modeSelect().disabled).toBe(false);
 
     fireEvent.change(modeSelect(), { target: { value: 'plan' } });
-    expect(post).toHaveBeenLastCalledWith({ type: 'set_mode', threadId: 'thread-1', mode: 'plan' });
+    expect(lastSent()).toEqual({ type: 'set_mode', threadId: 'thread-1', mode: 'plan' });
     // Until the extension confirms the switch, the picker keeps showing the mode the thread runs in.
     expect(modeSelect().value).toBe('auto_edit');
 
@@ -247,17 +259,16 @@ describe('App', () => {
   });
 
   it('can change the mode while a turn is running', () => {
-    const post = vi.fn();
-    render(<App post={post} />);
+    mount();
     open();
     event(turnStarted('Count'));
 
     fireEvent.change(modeSelect(), { target: { value: 'full_auto' } });
-    expect(post).toHaveBeenLastCalledWith({ type: 'set_mode', threadId: 'thread-1', mode: 'full_auto' });
+    expect(lastSent()).toEqual({ type: 'set_mode', threadId: 'thread-1', mode: 'full_auto' });
   });
 
   it('shows each thread’s own mode', () => {
-    render(<App post={() => {}} />);
+    mount();
     open(undefined, THREAD, 'full_auto');
     expect(modeSelect().value).toBe('full_auto');
 
@@ -266,8 +277,7 @@ describe('App', () => {
   });
 
   it('replaces the conversation when the extension switches thread', () => {
-    const post = vi.fn();
-    render(<App post={post} />);
+    mount();
     open();
     event(turnStarted('First thread'));
 
@@ -279,15 +289,14 @@ describe('App', () => {
     // The first thread's turn was still running, but the new thread can take a prompt.
     type('Second thread');
     fireEvent.click(sendButton());
-    expect(post).toHaveBeenCalledWith(expect.objectContaining({ type: 'prompt', threadId: 'thread-2', text: 'Second thread' }));
+    expect(extension.sent).toContainEqual(expect.objectContaining({ type: 'prompt', threadId: 'thread-2', text: 'Second thread' }));
   });
 
   it('keeps each thread’s unsent draft, including while the sidebar is hidden', () => {
     let saved: Drafts = new Map([['thread-1', 'Half-written']]);
     // `save` returns a value, as VS Code's `setState` does; the app must not hand it to React.
     const drafts = { load: () => saved, save: (next: Drafts) => (saved = next) };
-    const post = vi.fn();
-    const { unmount } = render(<App post={post} drafts={drafts} />);
+    const { unmount } = mount(drafts);
     open();
     expect(input().value).toBe('Half-written');
     type('Half-written prompt');
@@ -296,11 +305,11 @@ describe('App', () => {
     open([], { id: 'thread-2', agent: 'claude', workspace: 'uni-agent' });
     expect(input().value).toBe('');
     fireEvent.keyDown(input(), { key: 'Enter' });
-    expect(post).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'prompt' }));
+    expect(sent('prompt')).toHaveLength(0);
     type('For the second thread');
 
     unmount();
-    render(<App post={post} drafts={drafts} />);
+    mount(drafts);
     open();
     expect(input().value).toBe('Half-written prompt');
     open([], { id: 'thread-2', agent: 'claude', workspace: 'uni-agent' });
@@ -308,18 +317,39 @@ describe('App', () => {
   });
 
   it('ignores messages that do not match the protocol', () => {
-    render(<App post={() => {}} />);
+    mount();
     open();
 
     act(() => {
-      window.dispatchEvent(new MessageEvent('message', { data: { type: 'event', threadId: 'thread-1', event: { type: 'nonsense' }, at: 0 } }));
+      extension.deliverRaw({ data: { type: 'event', threadId: 'thread-1', event: { type: 'nonsense' }, at: 0 } });
     });
 
     expect(screen.getByText('No messages yet.')).toBeTruthy();
   });
 
+  it('applies an answer to the thread the prompt went to, even once another is shown', async () => {
+    mount();
+    open();
+    type('Accepted later');
+    fireEvent.click(sendButton());
+    open([], { id: 'thread-2', agent: 'claude', workspace: 'uni-agent' });
+    type('Rejected later');
+    fireEvent.click(sendButton());
+    open();
+
+    await answer({ type: 'prompt_result', threadId: 'thread-2', submissionId: 'submission-2', status: 'rejected', reason: 'busy' });
+    // The shown thread is not the rejected one, so it gets neither the reason nor a stopped turn.
+    expect(screen.queryByRole('alert')).toBeNull();
+    await answer({ type: 'prompt_result', threadId: 'thread-1', submissionId: 'submission-1', status: 'accepted' });
+    expect(input().value).toBe('');
+
+    open([], { id: 'thread-2', agent: 'claude', workspace: 'uni-agent' });
+    expect(input().value).toBe('Rejected later');
+    expect(screen.getByRole('alert').textContent).toContain('busy');
+  });
+
   it('shows agent errors in the thread and in the status', () => {
-    render(<App post={() => {}} />);
+    mount();
 
     open([
       { type: 'session_started', agent: 'claude', sessionId: 's1' },
@@ -344,8 +374,7 @@ describe('App approvals', () => {
   };
 
   it('shows a restored read-only thread’s history, and why it takes no more prompts', () => {
-    const post = vi.fn();
-    render(<App post={post} />);
+    mount();
     const reason = 'Session can’t be resumed — start a new thread.';
     receive({
       type: 'history',
@@ -363,11 +392,11 @@ describe('App approvals', () => {
     expect(sendButton().disabled).toBe(true);
     expect(modeSelect().disabled).toBe(true);
     fireEvent.keyDown(input(), { key: 'Enter' });
-    expect(post).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'prompt' }));
+    expect(sent('prompt')).toHaveLength(0);
   });
 
   it('turns read-only when the extension says the session could not be resumed', () => {
-    render(<App post={() => {}} />);
+    mount();
     open();
     type('Again');
     expect(sendButton().disabled).toBe(false);
@@ -383,8 +412,7 @@ describe('App approvals', () => {
   });
 
   it('shows the tool call, its input and the ask, and posts the answer the user picks', () => {
-    const post = vi.fn();
-    render(<App post={post} />);
+    mount();
     open();
     event(turnStarted('Tidy up'));
     event(permissionRequest);
@@ -395,11 +423,11 @@ describe('App approvals', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Allow once' }));
 
-    expect(post).toHaveBeenCalledWith({ type: 'permission_response', threadId: 'thread-1', requestId: 'permission-1', optionId: 'allow' });
+    expect(extension.sent).toContainEqual({ type: 'permission_response', threadId: 'thread-1', requestId: 'permission-1', optionId: 'allow' });
   });
 
   it('shows what a tool returned, whether as content or as the agent’s own value', () => {
-    render(<App post={() => {}} />);
+    mount();
     open();
     event(turnStarted('Search'));
     event({
@@ -425,7 +453,7 @@ describe('App approvals', () => {
   });
 
   it('replaces the ask with the answer once the extension confirms it', () => {
-    render(<App post={() => {}} />);
+    mount();
     open();
     event(turnStarted('Tidy up'));
     event(permissionRequest);

@@ -1,14 +1,10 @@
-import { Option, Schema } from 'effect';
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
-import type { AgentKind, Mode } from '../../src/agents/events';
-import { ExtensionMessage, type PromptRejection, type WebviewMessage } from '../../src/protocol';
+import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
+import type { PromptRejection } from '../../src/protocol';
 import { Composer } from './Composer';
 import { AGENT_NAMES } from './labels';
+import type { SidebarClient } from './sidebarClient';
 import { ThreadHeading } from './ThreadHeading';
-import { emptyThread, threadReducer } from './threadState';
 import { Transcript } from './Transcript';
-
-const decodeExtensionMessage = Schema.decodeUnknownOption(ExtensionMessage);
 
 /** Unsent drafts by thread ID. */
 export type Drafts = ReadonlyMap<string, string>;
@@ -20,17 +16,15 @@ export interface DraftStore {
 }
 
 interface AppProps {
-  post: (message: WebviewMessage) => void;
+  client: SidebarClient;
   drafts?: DraftStore;
 }
 
-export function App({ post, drafts }: AppProps) {
-  const [state, dispatch] = useReducer(threadReducer, emptyThread);
+export function App({ client, drafts }: AppProps) {
+  const state = useSyncExternalStore(client.subscribe, client.getSnapshot);
   // Each thread keeps its own draft, so switching thread never sends one thread's draft to another.
   const [draftsByThread, setDraftsByThread] = useState<Drafts>(() => drafts?.load() ?? new Map());
   const [rejections, setRejections] = useState<ReadonlyMap<string, string>>(new Map());
-  const pending = useRef(new Map<string, { submissionId: string; text: string }>());
-  const nextSubmission = useRef(0);
   const threadId = state.thread?.id;
   const draft = threadId === undefined ? '' : (draftsByThread.get(threadId) ?? '');
   const setDraft = (text: string) => {
@@ -39,104 +33,46 @@ export function App({ post, drafts }: AppProps) {
       setRejections((previous) => withoutReason(previous, threadId));
     }
   };
-  // Read by the stable callbacks below, so memoised turns do not re-render when these change.
-  const latest = useRef(state);
-  latest.current = state;
-
-  useEffect(() => {
-    const onMessage = (event: MessageEvent) => Option.map(decodeExtensionMessage(event.data), (message) => {
-      if (message.type === 'prompt_result') {
-        const submitted = pending.current.get(message.threadId);
-        if (!submitted || submitted.submissionId !== message.submissionId) {
-          return;
-        }
-        pending.current.delete(message.threadId);
-        if (message.status === 'accepted') {
-          setDraftsByThread((previous) => previous.get(message.threadId) === submitted.text ? withDraft(previous, message.threadId, '') : previous);
-        } else {
-          setRejections((previous) => new Map(previous).set(message.threadId, rejectionReason(message.reason)));
-          if (latest.current.thread?.id === message.threadId) {
-            latest.current = threadReducer(latest.current, { type: 'prompt_rejected' });
-            dispatch({ type: 'prompt_rejected' });
-          }
-        }
-        return;
-      }
-      dispatch(message);
-    });
-    window.addEventListener('message', onMessage);
-    return () => window.removeEventListener('message', onMessage);
-  }, []);
 
   // Braces matter: whatever `save` returns must not reach React, which would call it as a cleanup.
   useEffect(() => {
     drafts?.save(draftsByThread);
   }, [drafts, draftsByThread]);
 
-  /** Posts a prompt to the shown thread, unless a turn is running or no thread is shown yet. */
+  /**
+   * Sends a prompt to the shown thread, if it can take one. The answer may arrive after a thread
+   * switch, so it applies to the thread the prompt went to: an accepted prompt clears that thread's
+   * draft, unless the user has changed it since, and a rejected one leaves the reason beside it.
+   */
   const sendPrompt = useCallback(
     (text: string) => {
-      const { thread, running, readOnly } = latest.current;
-      if (!thread || running || readOnly !== null || !text.trim()) {
+      // Read from the client rather than the render, which may be a message behind.
+      const sentTo = client.getSnapshot().thread?.id;
+      const outcome = client.prompt(text);
+      if (sentTo === undefined || outcome === null) {
         return;
       }
-      const submissionId = `submission-${++nextSubmission.current}`;
-      pending.current.set(thread.id, { submissionId, text });
-      setRejections((previous) => withoutReason(previous, thread.id));
-      post({ type: 'prompt', threadId: thread.id, submissionId, text });
-      // Also update the ref now, so a second send before React re-renders is refused too.
-      latest.current = threadReducer(latest.current, { type: 'prompt_sent' });
-      dispatch({ type: 'prompt_sent' });
+      setRejections((previous) => withoutReason(previous, sentTo));
+      void outcome.then((result) => {
+        if (result.status === 'accepted') {
+          setDraftsByThread((previous) => previous.get(sentTo) === text ? withDraft(previous, sentTo, '') : previous);
+        } else if (result.status === 'rejected') {
+          setRejections((previous) => new Map(previous).set(sentTo, rejectionReason(result.reason)));
+        }
+      });
     },
-    [post]
-  );
-  const copy = useCallback((text: string) => post({ type: 'copy', text }), [post]);
-  const respond = useCallback(
-    (requestId: string, optionId: string) => {
-      const { thread } = latest.current;
-      if (thread) {
-        post({ type: 'permission_response', threadId: thread.id, requestId, optionId });
-      }
-    },
-    [post]
-  );
-
-  const setMode = useCallback(
-    (mode: Mode) => {
-      const { thread } = latest.current;
-      if (thread) {
-        post({ type: 'set_mode', threadId: thread.id, mode });
-      }
-    },
-    [post]
+    [client]
   );
 
   useEffect(() => {
-    const thread = state.thread;
-    if (thread) {
-      post({ type: 'get_models', threadId: thread.id, agent: thread.agent });
-    }
-  }, [post, state.thread?.id, state.thread?.agent]);
-
-  const setAgent = useCallback((agent: AgentKind) => {
-    const { thread, items } = latest.current;
-    if (thread && !items.some((item) => item.kind === 'turn')) {
-      post({ type: 'set_agent', threadId: thread.id, agent });
-    }
-  }, [post]);
-
-  const setModel = useCallback((model: string | null) => {
-    const { thread, running } = latest.current;
-    if (thread && !running) {
-      post({ type: 'set_model', threadId: thread.id, agent: thread.agent, model });
-    }
-  }, [post]);
+    client.requestModels();
+  }, [client, state.thread?.id, state.thread?.agent]);
 
   const agentName = state.thread ? AGENT_NAMES[state.thread.agent] : 'the agent';
   return (
     <main className="sidebar">
       <ThreadHeading state={state} />
-      <Transcript items={state.items} running={state.running} onRetry={sendPrompt} onCopy={copy} onRespond={respond} />
+      <Transcript items={state.items} running={state.running} onRetry={sendPrompt} onCopy={client.copy} onRespond={client.respond} />
       <Composer
         draft={draft}
         onDraftChange={setDraft}
@@ -149,14 +85,14 @@ export function App({ post, drafts }: AppProps) {
         agentName={agentName}
         agent={state.thread?.agent}
         agentLocked={state.running || state.items.some((item) => item.kind === 'turn')}
-        onAgentChange={setAgent}
+        onAgentChange={client.setAgent}
         selectedModel={state.selectedModel}
         models={state.models}
         modelError={state.modelError}
-        onModelChange={setModel}
+        onModelChange={client.setModel}
         modelBusy={state.running}
         mode={state.mode}
-        onModeChange={state.thread ? setMode : undefined}
+        onModeChange={state.thread ? client.setMode : undefined}
         config={state.config}
         workspace={state.thread?.workspace ?? null}
         branch={state.branch}

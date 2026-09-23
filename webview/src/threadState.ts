@@ -35,8 +35,8 @@ export const emptyThread: ThreadState = {
 };
 
 /**
- * What changes the thread: a message from the extension, or the composer having posted a prompt.
- * The webview blocks a second send while it waits for the extension's admission result.
+ * What changes the thread: a message from the extension, or the sidebar client having sent a prompt.
+ * The client blocks a second send while it waits for the extension's admission result.
  */
 export type ThreadAction = ExtensionMessage | { type: 'prompt_sent' } | { type: 'prompt_rejected' };
 
