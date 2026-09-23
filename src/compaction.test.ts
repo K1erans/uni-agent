@@ -2,16 +2,14 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Schema } from 'effect';
 import { describe, expect, it } from 'vitest';
-import { emptyThread, threadReducer, type ThreadState } from '../webview/src/threadState';
 import { AgentEvent } from './agents/events';
 import { Compactor, type CompactedEvent } from './compaction';
 import type { ThreadEvent } from './protocol';
+import { foldTranscript, type Transcript } from './transcript';
 
-const thread = { id: 'thread-1', agent: 'claude', workspace: null } as const;
-
-/** What the webview shows for these events. */
-function shown(events: ReadonlyArray<ThreadEvent>): ThreadState {
-  return threadReducer(emptyThread, { type: 'history', thread, mode: 'auto_edit', model: null, readOnly: null, events });
+/** The transcript these events show. */
+function shown(events: ReadonlyArray<ThreadEvent>): Transcript {
+  return foldTranscript(events);
 }
 
 /** Stores `events`, one arriving per millisecond, and returns the rows in the order they replay. */

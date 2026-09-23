@@ -3,6 +3,7 @@ import { RESUME_FAILED, type AgentAdapter, type EventSink, type MakeAdapter } fr
 import { AGENT_NAMES, DEFAULT_MODE, MODE_NAMES, type AgentKind, type Mode } from './agents/events';
 import { Compactor, type CompactedEvent } from './compaction';
 import { threadTitle, type ExtensionMessage, type ThreadEvent, type ThreadInfo } from './protocol';
+import { applyEvent, awaitingApproval, emptyTranscript, foldTranscript } from './transcript';
 
 /** Where a thread's agent runs. */
 export interface Workspace {
@@ -134,22 +135,6 @@ export interface Thread {
 }
 
 /**
- * The permission requests a thread's events leave open: those announced and not resolved since.
- * Adapters resolve every request before their turn ends, so this is empty between turns.
- */
-export function openApprovals(events: ReadonlyArray<ThreadEvent>): ReadonlySet<string> {
-  const open = new Set<string>();
-  for (const { event } of events) {
-    if (event.type === 'permission_request') {
-      open.add(event.requestId);
-    } else if (event.type === 'permission_resolved') {
-      open.delete(event.requestId);
-    }
-  }
-  return open;
-}
-
-/**
  * Makes a thread. A new one starts its adapter now (which starts no process until the first
  * prompt); a restored one leaves it until its next prompt, so showing it starts nothing.
  */
@@ -164,6 +149,8 @@ export function makeThread<R>(
     const context = yield* Effect.context<R>();
     const { onChanged = () => Effect.void, record = NO_RECORD, restored } = options;
     const history: ThreadEvent[] = [];
+    // The same fold the webview renders, kept up to date so the thread's status is read, not rescanned.
+    let transcript = emptyTranscript;
     let post: Post | undefined;
     let adapter: AgentAdapter | undefined;
     let running = false;
@@ -203,6 +190,7 @@ export function makeThread<R>(
           sessionId = event.sessionId;
         }
         history.push({ event, at });
+        transcript = applyEvent(transcript, { event, at });
         const rows = stored && compactor ? compactor.push(event, at) : [];
         return Effect.all(
           [
@@ -230,6 +218,7 @@ export function makeThread<R>(
       restored
         ? Effect.flatMap(restored.history, ({ events, complete, nextSeq }) => {
             history.splice(0, 0, ...events);
+            transcript = foldTranscript(history);
             compactor = new Compactor(nextSeq);
             return complete ? Effect.void : becomeReadOnly(HISTORY_UNREADABLE);
           })
@@ -281,10 +270,10 @@ export function makeThread<R>(
         return !prompted;
       },
       get needsApproval() {
-        return openApprovals(history).size > 0;
+        return awaitingApproval(transcript);
       },
       get status(): ThreadStatus {
-        if (openApprovals(history).size > 0) {
+        if (awaitingApproval(transcript)) {
           return 'needs_approval';
         }
         if (running) {
