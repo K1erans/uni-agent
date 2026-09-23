@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { Effect, Either } from 'effect';
 import { describe, expect, it } from 'vitest';
-import { createWorktree, GitRunner, inspectWorktree, prepareWorktree, removeWorktree } from './worktrees';
+import { createWorktree, GitRunner, inspectWorktree, prepareWorktree, removeWorktree, type Worktree } from './worktrees';
 
 describe('worktree isolation', () => {
   it('creates a checkout outside the repo and reports delegated edits', async () => {
@@ -70,6 +70,34 @@ describe('worktree isolation', () => {
       expect(Either.isLeft(result) && result.left._tag).toBe('WorktreeSetupFailed');
       expect(execFileSync('git', ['branch', '--list', 'uni/failed'], { cwd: repo }).toString().trim()).toBe('');
       await expect(fs.stat(path.join(root, 'storage', 'failed'))).rejects.toThrow();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('finishes a removal whose checkout is already gone, however it went', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'uni-agent-worktree-test-'));
+    const repo = path.join(root, 'repo');
+    const remove = (worktree: Worktree) => Effect.runPromise(removeWorktree(worktree, true).pipe(Effect.provide(GitRunner.live)));
+    try {
+      await fs.mkdir(repo);
+      execFileSync('git', ['init', '-q', repo]);
+      execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-q', '--allow-empty', '-m', 'initial'], { cwd: repo });
+      const storage = path.join(root, 'storage');
+      const byGit = await Effect.runPromise(createWorktree(repo, storage, 'by-git').pipe(Effect.provide(GitRunner.live)));
+      const byHand = await Effect.runPromise(createWorktree(repo, storage, 'by-hand').pipe(Effect.provide(GitRunner.live)));
+
+      // As if an earlier removal took the checkout and then failed to delete the branch.
+      execFileSync('git', ['worktree', 'remove', '--force', byGit.path], { cwd: repo });
+      await remove(byGit);
+      // A checkout deleted from disk, which git still lists.
+      await fs.rm(byHand.path, { recursive: true, force: true });
+      await remove(byHand);
+      // Nothing left to do is not a failure either.
+      await remove(byGit);
+
+      expect(execFileSync('git', ['branch', '--list', 'uni/*'], { cwd: repo }).toString().trim()).toBe('');
+      expect(execFileSync('git', ['worktree', 'list', '--porcelain'], { cwd: repo }).toString()).not.toContain(storage);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
