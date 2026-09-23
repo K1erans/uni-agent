@@ -4,29 +4,52 @@ import { DEFAULT_MODE, type AgentKind, type Mode } from './agents/events';
 import { Branches } from './branches';
 import { FullAutoOptIn } from './fullAutoOptIn';
 import { Ids } from './ids';
-import { makeThread, type Post, type PromptAdmission, type Thread, type Workspace } from './thread';
+import { makeThread, type Post, type PromptAdmission, type Thread, type ThreadStatus, type Workspace } from './thread';
 import type { PromptRejection } from './protocol';
 import { ThreadStore, type StoredThread } from './threadStore';
 import { Worktrees, type GitFailed, type Worktree, type WorktreeReview, type WorktreeSetupFailed } from './worktrees';
 
 export type PromptOutcome = { readonly status: 'accepted' } | { readonly status: 'rejected'; readonly reason: PromptRejection };
 
+/** What callers see of a thread: enough to list it, show its status and act on it by ID. */
+export interface ThreadSummary {
+  readonly id: string;
+  /** The agent it talks to; fixed once it has been prompted. */
+  readonly agent: AgentKind;
+  /** The first prompt's title; undefined until the first prompt. */
+  readonly title: string | undefined;
+  /** Where its agent runs: the workspace folder, or its worktree's checkout. */
+  readonly workspace: Workspace;
+  readonly worktree: Worktree | undefined;
+  readonly status: ThreadStatus;
+  /** Whether it is the thread the sidebar shows. */
+  readonly shown: boolean;
+  readonly archived: boolean;
+}
+
 /**
- * The window's threads and the one the sidebar shows. The sidebar webview connects when it loads
- * and disconnects when VS Code disposes it (the view hidden or collapsed); the threads and their
- * agents keep running in between, so reopening the sidebar replays the shown thread.
+ * The window's threads and the one the sidebar shows: the only way in to a thread. Callers get
+ * summaries and act by thread ID; this module owns which thread is shown, the webview connected
+ * to it, and the rules for acting on a thread (a stale message is ignored, a prompt goes only to
+ * the thread the webview still shows, Full auto needs the workspace's opt-in).
+ *
+ * The sidebar webview connects when it loads and disconnects when VS Code disposes it (the view
+ * hidden or collapsed); the threads and their agents keep running in between, so reopening the
+ * sidebar replays the shown thread.
  *
  * Threads are stored from their first prompt (see `ThreadStore`), so they outlive the window: the
  * stored ones are restored when this is made, without starting their agents, and each resumes its
  * native session with its next prompt. Archived threads are kept in the store but not in the window.
  */
 export interface Threads {
-  /** The thread the sidebar shows, if one has been created. */
-  readonly current: Thread | undefined;
   /** Every thread in the window (none archived), newest first. */
-  list(): ReadonlyArray<Thread>;
+  list(): ReadonlyArray<ThreadSummary>;
   /** The archived threads, most recently changed first. */
-  archived(): ReadonlyArray<StoredThread>;
+  archived(): ReadonlyArray<ThreadSummary>;
+  /** The thread the sidebar shows, if there is one. */
+  shown(): ThreadSummary | undefined;
+  /** The thread with this ID, if it is in the window and still talks to `agent`. */
+  find(threadId: string, agent: AgentKind): Option.Option<ThreadSummary>;
   /**
    * Connects the sidebar webview and shows it the current thread: the newest one if none has been
    * shown yet, or a new one, in the folder `Workspaces.choose` gives, if there are none. Ignored
@@ -37,16 +60,17 @@ export interface Threads {
   disconnect(post: Post): Effect.Effect<void>;
   /**
    * Shows a new thread with `agent`, by default the shown thread's agent (Claude when there is
-   * none), working in `where` (by default `Workspaces.fallback`). A current thread with that
-   * agent and folder that nobody has prompted yet is shown again instead.
+   * none), working in `where` (by default `Workspaces.fallback`). A shown thread with that agent
+   * and folder that nobody has prompted yet is shown again instead.
    */
-  create(agent?: AgentKind, where?: Workspace): Effect.Effect<Thread>;
-  /** Creates a thread in an isolated checkout of `where`; setup must finish before it is shown. */
-  createInWorktree(agent?: AgentKind, where?: Workspace): Effect.Effect<Thread, GitFailed | WorktreeSetupFailed>;
+  create(agent?: AgentKind, where?: Workspace): Effect.Effect<ThreadSummary>;
+  /**
+   * Creates a thread in an isolated checkout of `where` and shows it once the checkout is set up.
+   * Setup runs without holding up the other threads.
+   */
+  createInWorktree(agent?: AgentKind, where?: Workspace): Effect.Effect<ThreadSummary, GitFailed | WorktreeSetupFailed>;
   /** Reports what the worktree of the thread with this ID has changed, if it has a worktree. */
   reviewWorktree(threadId: string): Effect.Effect<WorktreeReview | undefined, GitFailed>;
-  /** The worktree of the thread with this ID, archived or not, if it has one. */
-  worktreeOf(threadId: string): Worktree | undefined;
   /** Shows the thread with this ID; unknown IDs are ignored. */
   select(threadId: string): Effect.Effect<void>;
   /**
@@ -67,8 +91,8 @@ export interface Threads {
   remove(threadId: string, discardBranch?: boolean): Effect.Effect<boolean, GitFailed>;
   /** Sends an intentional background prompt to a thread, shown or not. */
   prompt(threadId: string, text: string): Effect.Effect<PromptOutcome>;
-  /** Admits a sidebar prompt only while that webview still shows its named thread. */
-  submitSidebar(post: Post, threadId: string, text: string): Effect.Effect<PromptOutcome>;
+  /** Admits a prompt from the webview only while that webview still shows its named thread. */
+  submit(post: Post, threadId: string, text: string): Effect.Effect<PromptOutcome>;
   /** Answers a permission request in the thread with this ID, whether or not it is shown. */
   respond(threadId: string, requestId: string, optionId: string): Effect.Effect<void>;
   /**
@@ -76,10 +100,13 @@ export interface Threads {
    * in, so the thread keeps its mode and the webview keeps showing it.
    */
   setMode(threadId: string, mode: Mode): Effect.Effect<void>;
-  /** Changes an empty thread's agent in place; accepted prompts lock the agent. */
+  /** Changes the shown thread's agent in place while nobody has prompted it; a prompt locks the agent. */
   setAgent(threadId: string, agent: AgentKind): Effect.Effect<void>;
-  /** Changes a thread's selected model between prompts. */
-  setModel(threadId: string, model: string | undefined): Effect.Effect<void>;
+  /**
+   * Changes the model of the thread with this ID between prompts. Ignored if the thread no longer
+   * talks to `agent` (the webview asked before its agent changed).
+   */
+  setModel(threadId: string, agent: AgentKind, model: string | undefined): Effect.Effect<void>;
 }
 
 /** The agent a thread talks to when nothing chose one. */
@@ -293,14 +320,12 @@ export function makeThreads<R>(
       onSome: (where) => Effect.asVoid(create(undefined, where)),
     }));
 
+    // Checking out and setting up can take a while, so only showing the thread takes the lock.
     const createInWorktree = (agent = current?.info.agent ?? DEFAULT_AGENT, where = workspaces.fallback()) =>
       Effect.gen(function* () {
         const id = yield* ids.next;
-        const threadScope = yield* Scope.fork(scope, ExecutionStrategy.sequential);
-        return yield* Effect.gen(function* () {
-          const checkout = yield* checkouts.create(where.cwd, id);
-          return yield* openThread(id, agent, where, threadScope, checkout);
-        }).pipe(Effect.onError(() => Scope.close(threadScope, Exit.void)));
+        const checkout = yield* checkouts.create(where.cwd, id);
+        return yield* serial(Effect.flatMap(Scope.fork(scope, ExecutionStrategy.sequential), (threadScope) => openThread(id, agent, where, threadScope, checkout)));
       });
 
     const remove = (threadId: string, discardBranch = false) =>
@@ -330,6 +355,26 @@ export function makeThreads<R>(
       }));
 
     const find = (threadId: string) => Option.fromNullable(threads.find((thread) => thread.info.id === threadId));
+    const summary = (thread: Thread): ThreadSummary => ({
+      id: thread.info.id,
+      agent: thread.info.agent,
+      title: thread.title,
+      workspace: thread.workspace,
+      worktree: worktrees.get(thread.info.id),
+      status: thread.status,
+      shown: thread === current,
+      archived: false,
+    });
+    const archivedSummary = (entry: StoredThread): ThreadSummary => ({
+      id: entry.id,
+      agent: entry.agent,
+      title: entry.title,
+      workspace: entry.workspace,
+      worktree: entry.worktree,
+      status: entry.readOnly === undefined ? 'idle' : 'read_only',
+      shown: false,
+      archived: true,
+    });
     /** The worktree of a thread in the window or archived. */
     const checkoutOf = (threadId: string) => worktrees.get(threadId) ?? archived.find((entry) => entry.id === threadId)?.worktree;
     const outcome = (admission: PromptAdmission): PromptOutcome =>
@@ -341,11 +386,10 @@ export function makeThreads<R>(
       });
 
     return {
-      get current() {
-        return current;
-      },
-      list: () => [...threads],
-      archived: () => archived,
+      list: () => threads.map(summary),
+      archived: () => archived.map(archivedSummary),
+      shown: () => (current ? summary(current) : undefined),
+      find: (threadId, agent) => Option.map(Option.filter(find(threadId), (thread) => thread.info.agent === agent), summary),
       connect: (post) =>
         serial(
           Effect.suspend(() => {
@@ -368,13 +412,12 @@ export function makeThreads<R>(
             return Effect.zipRight(stopBranchWatch, current ? current.detach() : Effect.void);
           })
         ),
-      create: (agent, where) => serial(create(agent, where)),
-      createInWorktree: (agent, where) => serial(createInWorktree(agent, where)),
+      create: (agent, where) => serial(Effect.map(create(agent, where), summary)),
+      createInWorktree: (agent, where) => Effect.map(createInWorktree(agent, where), summary),
       reviewWorktree: (threadId) => Effect.suspend(() => {
         const checkout = checkoutOf(threadId);
         return checkout ? checkouts.review(checkout) : Effect.succeed(undefined);
       }),
-      worktreeOf: checkoutOf,
       select: (threadId) =>
         serial(
           Option.match(find(threadId), {
@@ -414,7 +457,7 @@ export function makeThreads<R>(
         ),
       remove,
       prompt,
-      submitSidebar: (post, threadId, text) => serial(Effect.suspend(() =>
+      submit: (post, threadId, text) => serial(Effect.suspend(() =>
         connected !== post || current?.info.id !== threadId
           ? Effect.succeed({ status: 'rejected', reason: 'stale' } as const)
           : prompt(threadId, text)
@@ -436,8 +479,8 @@ export function makeThreads<R>(
             }),
         }),
       setAgent,
-      setModel: (threadId, model) => serial(Option.match(find(threadId), {
-        onNone: () => Effect.logWarning(`Ignored a model for unknown thread ${threadId}`),
+      setModel: (threadId, agent, model) => serial(Option.match(Option.filter(find(threadId), (thread) => thread.info.agent === agent), {
+        onNone: () => Effect.logDebug(`Ignored a ${agent} model for thread ${threadId}, which no longer talks to ${agent}`),
         onSome: (thread) => thread.setModel(model),
       })),
     };
