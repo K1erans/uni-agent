@@ -16,7 +16,7 @@ const THREAD: ThreadInfo = { id: 'thread-1', agent: 'claude', workspace: 'uni-ag
 
 /** Shows a thread with these events, as the extension does when the webview reports ready. */
 function open(events: AgentEvent[] = [{ type: 'session_started', agent: 'claude', sessionId: 's1' }], thread = THREAD, mode: Mode = 'auto_edit') {
-  receive({ type: 'history', thread, mode, model: null, events: events.map((event) => ({ event, at: 0 })) });
+  receive({ type: 'history', thread, mode, model: null, readOnly: null, events: events.map((event) => ({ event, at: 0 })) });
 }
 
 function event(agentEvent: AgentEvent, at = 0) {
@@ -342,6 +342,45 @@ describe('App approvals', () => {
       { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
     ],
   };
+
+  it('shows a restored read-only thread’s history, and why it takes no more prompts', () => {
+    const post = vi.fn();
+    render(<App post={post} />);
+    const reason = 'Session can’t be resumed — start a new thread.';
+    receive({
+      type: 'history',
+      thread: THREAD,
+      mode: 'auto_edit',
+      model: null,
+      readOnly: reason,
+      events: [turnStarted('Fix the build'), { type: 'turn_ended', turnId: 't1', stopReason: 'interrupted' } satisfies AgentEvent].map((agentEvent) => ({ event: agentEvent, at: 0 })),
+    });
+
+    expect(screen.getByText('Interrupted when VS Code closed')).toBeTruthy();
+    expect(screen.getByText(reason).getAttribute('role')).toBe('status');
+    expect(screen.getByRole('img', { name: 'Status: Read-only' })).toBeTruthy();
+    expect(input().disabled).toBe(true);
+    expect(sendButton().disabled).toBe(true);
+    expect(modeSelect().disabled).toBe(true);
+    fireEvent.keyDown(input(), { key: 'Enter' });
+    expect(post).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'prompt' }));
+  });
+
+  it('turns read-only when the extension says the session could not be resumed', () => {
+    render(<App post={() => {}} />);
+    open();
+    type('Again');
+    expect(sendButton().disabled).toBe(false);
+
+    receive({ type: 'read_only', threadId: 'thread-1', reason: 'Session can’t be resumed — start a new thread.' });
+
+    expect(input().disabled).toBe(true);
+    expect(sendButton().disabled).toBe(true);
+    // Another thread's state never crosses over.
+    receive({ type: 'read_only', threadId: 'thread-2', reason: 'elsewhere' });
+    expect(screen.getByText('Session can’t be resumed — start a new thread.')).toBeTruthy();
+    expect(screen.queryByText('elsewhere')).toBeNull();
+  });
 
   it('shows the tool call, its input and the ask, and posts the answer the user picks', () => {
     const post = vi.fn();

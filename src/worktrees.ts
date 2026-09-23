@@ -74,15 +74,29 @@ export function prepareWorktree(
   });
 }
 
-/** Removes the checkout; branch removal is a separate, explicit discard choice. */
+/**
+ * Removes the checkout; branch removal is a separate, explicit discard choice. Each step is skipped
+ * once done, so a removal that failed partway (or a checkout removed outside Uni Agent) can be
+ * retried: git refuses to remove a checkout that is already gone, or a branch already deleted.
+ */
 export function removeWorktree(worktree: Worktree, discardBranch: boolean): Effect.Effect<void, GitFailed, GitRunner> {
   return Effect.gen(function* () {
     const git = yield* GitRunner;
-    yield* git.run(worktree.repo, ['worktree', 'remove', '--force', worktree.path]);
-    if (discardBranch) {
+    if (yield* exists(worktree.path)) {
+      yield* git.run(worktree.repo, ['worktree', 'remove', '--force', worktree.path]);
+    } else {
+      // Forgets a checkout deleted from disk while git still lists it.
+      yield* git.run(worktree.repo, ['worktree', 'prune']);
+    }
+    if (discardBranch && (yield* git.run(worktree.repo, ['branch', '--list', worktree.branch])).trim()) {
       yield* git.run(worktree.repo, ['branch', '-D', worktree.branch]);
     }
   });
+}
+
+/** Whether a file or folder exists; never fails. */
+function exists(location: string): Effect.Effect<boolean> {
+  return Effect.promise(() => fs.access(location).then(() => true, () => false));
 }
 
 /** Runs the configured command in the checkout; interruption stops its shell process. */

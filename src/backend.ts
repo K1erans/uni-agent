@@ -53,10 +53,7 @@ export function makeBackendTask(
         model,
         onEvent: sink,
       }),
-      () => Effect.void,
-      onEvent,
-      options.model,
-      options.mode ?? DEFAULT_MODE
+      { onEvent, model: options.model, mode: options.mode ?? DEFAULT_MODE }
     );
     return {
       workspace,

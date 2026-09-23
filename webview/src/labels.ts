@@ -10,6 +10,7 @@ export const STATUS_LABELS = {
   not_found: 'Not found',
   not_signed_in: 'Not signed in',
   stopped: 'Stopped',
+  read_only: 'Read-only',
 } satisfies Record<AgentStatus, string>;
 
 export const ERROR_TITLES = {
@@ -17,6 +18,7 @@ export const ERROR_TITLES = {
   not_signed_in: 'Not signed in',
   process_crashed: 'The agent stopped unexpectedly',
   agent_error: 'The response couldn’t finish',
+  resume_failed: 'The session couldn’t be resumed',
 } satisfies Record<AgentErrorCode, string>;
 
 /** Claude Code's permission modes; any other agent or mode is shown as the agent names it. */

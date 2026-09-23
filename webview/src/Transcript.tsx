@@ -15,6 +15,7 @@ const STOP_NOTES = {
   max_tokens: 'Stopped at the output limit',
   max_turn_requests: 'Stopped at the turn limit',
   refusal: 'The agent declined to continue',
+  interrupted: 'Interrupted when VS Code closed',
   end_turn: undefined,
   error: undefined,
 } satisfies Record<StopReason, string | undefined>;

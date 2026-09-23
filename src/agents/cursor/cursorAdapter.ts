@@ -151,10 +151,13 @@ export class CursorAdapter extends JsonRpcAdapter<CursorTurn> {
         Initialized
       );
       const session = { cwd: this.options.cwd, mcpServers: [] };
-      if (Option.isSome(resume) && agentCapabilities?.loadSession) {
+      if (Option.isSome(resume)) {
+        if (!agentCapabilities?.loadSession) {
+          return yield* this.resumeFailed('Cursor did not offer to load sessions.');
+        }
         const sessionId = resume.value;
         this.loading = true;
-        const loaded = yield* rpc.request('session/load', { sessionId, ...session }, SessionOpened).pipe(Effect.ensuring(Effect.sync(() => (this.loading = false))));
+        const loaded = yield* this.resuming(rpc.request('session/load', { sessionId, ...session }, SessionOpened)).pipe(Effect.ensuring(Effect.sync(() => (this.loading = false))));
         return yield* this.inMode(rpc, sessionId, loaded);
       }
       const created = yield* rpc.request('session/new', session, SessionCreated);

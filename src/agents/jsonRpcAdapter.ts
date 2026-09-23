@@ -1,6 +1,6 @@
 import { Data, Effect, ExecutionStrategy, Exit, Option, Scope, type Context } from 'effect';
 import type { Ids } from '../ids';
-import type { AdapterOptions } from './adapter';
+import { resumeFailedMessage, type AdapterOptions } from './adapter';
 import { BaseAdapter } from './baseAdapter';
 import { AGENT_NAMES, type AgentErrorCode, type ContentBlock } from './events';
 import type { Executables } from './findExecutable';
@@ -38,7 +38,9 @@ interface Connection {
  * has created it.
  *
  * The process starts with the first prompt and serves every turn after it. If it dies, the running
- * turn ends as `error` and the next prompt starts a new process that resumes the session. The
+ * turn ends as `error` and the next prompt starts a new process that resumes the session. A stored
+ * session (`options.resume`) is resumed the same way by the first prompt. A session the agent
+ * cannot resume ends the turn with `resume_failed`; a new one is never started in its place. The
  * process lives in a scope forked from the adapter's, so closing the adapter's scope stops it.
  */
 export abstract class JsonRpcAdapter<T extends Turn> extends BaseAdapter<T> {
@@ -57,9 +59,13 @@ export abstract class JsonRpcAdapter<T extends Turn> extends BaseAdapter<T> {
     scope: Scope.Scope
   ) {
     super(options, executables, ids, modeSettings, scope);
+    this.sessionId = options.resume;
   }
 
-  /** Initialises a new process and opens a session, resuming `resume` if given. */
+  /**
+   * Initialises a new process and opens a session, resuming `resume` if given. A session that
+   * cannot be resumed fails with {@link JsonRpcAdapter.resumeFailed}, never by opening another.
+   */
   protected abstract openSession(rpc: JsonRpcConnection, resume: Option.Option<string>): Effect.Effect<OpenedSession, TurnError>;
 
   /** Sends the prompt. The turn ends when the agent says so, through `endTurn`. */
@@ -74,6 +80,16 @@ export abstract class JsonRpcAdapter<T extends Turn> extends BaseAdapter<T> {
    */
   protected handleRequest(_method: string, _params: WireMessage | undefined): Effect.Effect<Option.Option<Effect.Effect<WireMessage>>, MalformedMessage> {
     return Effect.succeedNone;
+  }
+
+  /** The failure that ends a turn whose session the agent could not resume; the thread becomes read-only. */
+  protected resumeFailed(detail: string): AgentFailure {
+    return new AgentFailure({ code: 'resume_failed', message: resumeFailedMessage(this.agent, detail) });
+  }
+
+  /** Reports an error answer to a resume request as a failed resume; other failures pass through. */
+  protected resuming<A>(request: Effect.Effect<A, TurnError>): Effect.Effect<A, TurnError> {
+    return Effect.mapError(request, (error) => (error._tag === 'RpcError' ? this.resumeFailed(error.message) : error));
   }
 
   /** How an error the agent answered a request with is shown; override to recognise the agent's own codes. */

@@ -1,7 +1,8 @@
-import { Clock, Data, Effect, Fiber, type Scope } from 'effect';
-import type { EventSink, MakeAdapter } from './agents/adapter';
+import { Clock, Data, Effect, Fiber, Scope } from 'effect';
+import { RESUME_FAILED, type AgentAdapter, type EventSink, type MakeAdapter } from './agents/adapter';
 import { AGENT_NAMES, DEFAULT_MODE, MODE_NAMES, type AgentEvent, type AgentKind, type Mode, type StopReason } from './agents/events';
 import { threadTitle, type ExtensionMessage, type ThreadEvent, type ThreadInfo } from './protocol';
+import type { StoredHistory } from './threadStore';
 
 /** Where a thread's agent runs. */
 export interface Workspace {
@@ -13,7 +14,10 @@ export interface Workspace {
 /** Delivers a message to the connected webview. */
 export type Post = (message: ExtensionMessage) => Effect.Effect<void>;
 
-export class PromptRejected extends Data.TaggedError('PromptRejected')<{ readonly reason: 'busy' | 'empty' }> {}
+export class PromptRejected extends Data.TaggedError('PromptRejected')<{ readonly reason: PromptRefusal }> {}
+
+/** Why a thread refused a prompt. */
+export type PromptRefusal = 'busy' | 'empty' | 'read_only';
 
 export interface TurnResult {
   readonly agent: AgentKind;
@@ -26,13 +30,66 @@ export interface TurnResult {
 
 export type PromptAdmission =
   | { readonly status: 'accepted'; readonly completion: Effect.Effect<TurnResult> }
-  | { readonly status: 'rejected'; readonly reason: 'busy' | 'empty' };
+  | { readonly status: 'rejected'; readonly reason: PromptRefusal };
+
+/** How a thread is doing, for lists of threads. */
+export type ThreadStatus = 'running' | 'needs_approval' | 'idle' | 'read_only';
+
+/** What a thread says once some of its stored history cannot be read. */
+export const HISTORY_UNREADABLE = 'Some of this thread’s history couldn’t be read, so it is read-only. Start a new thread to go on.';
+
+/**
+ * Where a thread keeps what happens to it, so it outlives the window. A journal never fails: what
+ * it cannot keep, it logs.
+ */
+export interface ThreadJournal {
+  /** Records an event the thread's agent emitted, and when it arrived. */
+  record(event: AgentEvent, at: number): Effect.Effect<void>;
+  setMode(mode: Mode): Effect.Effect<void>;
+  setModel(model: string | undefined): Effect.Effect<void>;
+  markReadOnly(reason: string): Effect.Effect<void>;
+}
+
+/** A journal that keeps nothing, for threads that are not stored. */
+export const NO_JOURNAL: ThreadJournal = {
+  record: () => Effect.void,
+  setMode: () => Effect.void,
+  setModel: () => Effect.void,
+  markReadOnly: () => Effect.void,
+};
+
+/**
+ * A stored thread brought back after a reload. Its history is loaded when it is first shown or
+ * prompted, and its agent is started by its next prompt, which resumes the stored session.
+ */
+export interface RestoredThread {
+  readonly agent: AgentKind;
+  readonly sessionId: string | undefined;
+  readonly title: string | undefined;
+  /** Why the thread is read-only, if it already is. */
+  readonly readOnly: string | undefined;
+  readonly history: Effect.Effect<StoredHistory>;
+}
+
+export interface ThreadOptions {
+  /**
+   * Told whenever the thread has seen an event or changed status, so a view outside the webview
+   * (the thread list, the sidebar's badge) can catch up with, for example, a thread waiting for approval.
+   */
+  readonly onChanged?: () => Effect.Effect<void>;
+  readonly onEvent?: EventSink;
+  readonly model?: string;
+  /** The mode the thread starts in; {@link DEFAULT_MODE} if left out. */
+  readonly mode?: Mode;
+  readonly journal?: ThreadJournal;
+  readonly restored?: RestoredThread;
+}
 
 /**
  * One conversation with one agent. Keeps every event the adapter emits, stamped with when it
  * arrived, so a webview that (re)loads or switches to this thread is brought up to date by
- * replaying them. The thread and its adapter live in the scope that makes them; closing it stops
- * the agent.
+ * replaying them, and hands them to its journal to be stored. The thread and its adapter live in
+ * the scope that makes them; closing it stops the agent.
  */
 export interface Thread {
   readonly info: ThreadInfo;
@@ -43,6 +100,9 @@ export interface Thread {
   readonly isEmpty: boolean;
   /** Whether the agent is waiting for the user to answer a permission request. */
   readonly needsApproval: boolean;
+  readonly status: ThreadStatus;
+  /** Why the thread takes no more prompts, if it does not. */
+  readonly readOnly: string | undefined;
   /** How freely the agent may act; new threads start in {@link DEFAULT_MODE}. */
   readonly mode: Mode;
   readonly selectedModel: string | undefined;
@@ -84,35 +144,45 @@ export function openApprovals(events: ReadonlyArray<ThreadEvent>): ReadonlySet<s
 }
 
 /**
- * @param onChanged Told whenever the thread has seen an event, so a view outside the webview (the
- * thread list, the sidebar's badge) can catch up with, for example, a thread waiting for approval.
+ * Makes a thread. A new one starts its adapter now (which starts no process until the first
+ * prompt); a restored one leaves it until its next prompt, so showing it starts nothing.
  */
 export function makeThread<R>(
   id: string,
   workspace: Workspace,
   makeAdapter: MakeAdapter<R>,
-  onChanged: () => Effect.Effect<void> = () => Effect.void,
-  onEvent: EventSink = () => Effect.void,
-  model?: string,
-  initialMode: Mode = DEFAULT_MODE
+  options: ThreadOptions = {}
 ): Effect.Effect<Thread, never, R | Scope.Scope> {
   return Effect.gen(function* () {
     const scope = yield* Effect.scope;
+    const context = yield* Effect.context<R>();
+    const { onChanged = () => Effect.void, onEvent = () => Effect.void, journal = NO_JOURNAL, restored } = options;
     const history: ThreadEvent[] = [];
     let post: Post | undefined;
+    let adapter: AgentAdapter | undefined;
     let running = false;
-    let prompted = false;
-    let title: string | undefined;
-    let mode = initialMode;
-    let sessionId: string | undefined;
+    let prompted = restored !== undefined;
+    let title = restored?.title;
+    let mode = options.mode ?? DEFAULT_MODE;
+    let sessionId = restored?.sessionId;
     let configuredModel: string | undefined;
     let defaultReportedModel: string | undefined;
-    let selectedModel = model;
+    let selectedModel = options.model;
+    let readOnly = restored?.readOnly;
     // Mode changes arrive on fibers of their own; one at a time keeps the mode shown in step with
     // the one the agent runs in.
     const modeLock = yield* Effect.makeSemaphore(1);
 
-    const adapter = yield* makeAdapter((event) =>
+    const becomeReadOnly = (reason: string) =>
+      Effect.suspend(() => {
+        if (readOnly !== undefined) {
+          return Effect.void;
+        }
+        readOnly = reason;
+        return Effect.all([journal.markReadOnly(reason), post ? post({ type: 'read_only', threadId: id, reason }) : Effect.void, onChanged()], { discard: true });
+      });
+
+    const sink: EventSink = (event) =>
       Effect.flatMap(Clock.currentTimeMillis, (at) => {
         if (event.type === 'session_started') {
           sessionId = event.sessionId;
@@ -124,36 +194,67 @@ export function makeThread<R>(
           title = threadTitle(event.prompt.map((block) => block.text).join('\n'));
         }
         history.push({ event, at });
-        return Effect.zipRight(Effect.zipRight(post ? post({ type: 'event', threadId: id, event, at }) : Effect.void, onChanged()), onEvent(event));
-      }),
-      mode,
-      model
-    );
-    // Finalizers run in reverse, so this runs before the adapter stops and its last events are not
-    // posted to a closed webview.
-    yield* Effect.addFinalizer(() => Effect.sync(() => (post = undefined)));
+        return Effect.all(
+          [
+            journal.record(event, at),
+            post ? post({ type: 'event', threadId: id, event, at }) : Effect.void,
+            onChanged(),
+            onEvent(event),
+            event.type === 'error' && event.code === 'resume_failed' ? becomeReadOnly(RESUME_FAILED) : Effect.void,
+          ],
+          { discard: true }
+        );
+      });
 
-    const info: ThreadInfo = { id, agent: adapter.agent, workspace: workspace.name };
+    // Made once, when first needed. It lives in the thread's scope; the finalizer added after it
+    // runs first, so the adapter's last events are not posted to a closed webview.
+    const adapterFor = yield* Effect.cached(
+      Effect.suspend(() => makeAdapter(sink, mode, selectedModel, sessionId)).pipe(
+        Effect.tap((made) => Effect.zipRight(Effect.sync(() => (adapter = made)), Effect.addFinalizer(() => Effect.sync(() => (post = undefined))))),
+        Scope.extend(scope),
+        Effect.provide(context)
+      )
+    );
+    // A restored thread's history is read from the store once, before it is first shown or prompted.
+    const loaded = yield* Effect.cached(
+      restored
+        ? Effect.flatMap(restored.history, ({ events, complete }) => {
+            history.splice(0, 0, ...events);
+            return complete ? Effect.void : becomeReadOnly(HISTORY_UNREADABLE);
+          })
+        : Effect.void
+    );
+    const agent = restored ? restored.agent : (yield* adapterFor).agent;
+
+    const info: ThreadInfo = { id, agent, workspace: workspace.name };
+    // History is loaded before a prompt is admitted: loading can find it unreadable, which makes
+    // the thread read-only, and a prompt admitted before then would still reach the agent.
     const prompt = (text: string): Effect.Effect<PromptAdmission> =>
-      Effect.suspend(() => {
+      Effect.zipRight(loaded, Effect.suspend(() => {
         if (!text.trim()) {
           return Effect.succeed({ status: 'rejected' as const, reason: 'empty' as const });
         }
         if (running) {
           return Effect.succeed({ status: 'rejected' as const, reason: 'busy' as const });
         }
+        if (readOnly !== undefined) {
+          return Effect.succeed({ status: 'rejected' as const, reason: 'read_only' as const });
+        }
         running = true;
         prompted = true;
-        const from = history.length;
-        const turn = adapter.prompt([{ type: 'text', text }]).pipe(
-          Effect.orDie,
-          Effect.map((stopReason): TurnResult => {
-            const events = history.slice(from).map(({ event }) => event);
-            return { agent: adapter.agent, model: configuredModel, sessionId, stopReason, response: replyText(events), events };
-          }),
-          Effect.ensuring(Effect.sync(() => { running = false; }))
-        );
+        const turn = Effect.gen(function* () {
+          const started = yield* adapterFor;
+          const from = history.length;
+          const stopReason = yield* Effect.orDie(started.prompt([{ type: 'text', text }]));
+          const events = history.slice(from).map(({ event }) => event);
+          return { agent, model: configuredModel, sessionId, stopReason, response: replyText(events), events } satisfies TurnResult;
+        }).pipe(Effect.ensuring(Effect.sync(() => { running = false; })));
         return Effect.map(Effect.forkIn(turn, scope), (fiber): PromptAdmission => ({ status: 'accepted', completion: Fiber.join(fiber) }));
+      }));
+    const showMode = (next: Mode) =>
+      Effect.suspend(() => {
+        mode = next;
+        return Effect.zipRight(journal.setMode(next), post ? post({ type: 'mode', threadId: id, mode: next }) : Effect.void);
       });
     return {
       info,
@@ -167,6 +268,18 @@ export function makeThread<R>(
       get needsApproval() {
         return openApprovals(history).size > 0;
       },
+      get status(): ThreadStatus {
+        if (openApprovals(history).size > 0) {
+          return 'needs_approval';
+        }
+        if (running) {
+          return 'running';
+        }
+        return readOnly === undefined ? 'idle' : 'read_only';
+      },
+      get readOnly() {
+        return readOnly;
+      },
       get mode() {
         return mode;
       },
@@ -174,49 +287,61 @@ export function makeThread<R>(
         return selectedModel;
       },
       attach: (next) =>
-        Effect.suspend(() => {
-          post = next;
-          return next({ type: 'history', thread: info, mode, model: selectedModel ?? null, events: [...history] });
-        }),
+        Effect.zipRight(
+          loaded,
+          Effect.suspend(() => {
+            post = next;
+            return next({ type: 'history', thread: info, mode, model: selectedModel ?? null, readOnly: readOnly ?? null, events: [...history] });
+          })
+        ),
       detach: () => Effect.sync(() => (post = undefined)),
       prompt,
       run: (text) => Effect.flatMap(prompt(text), (admission) =>
         admission.status === 'accepted' ? admission.completion : new PromptRejected({ reason: admission.reason })
       ),
-      cancel: () => adapter.cancel(),
+      cancel: () => Effect.suspend(() => (adapter ? adapter.cancel() : Effect.void)),
       respond: (requestId, optionId) =>
-        // An answer for a request that is no longer open (the turn ended, or a second click) is
-        // nothing to act on, and never a reason to break the thread.
-        Effect.catchTag(adapter.respond(requestId, optionId), 'UnknownPermissionRequest', (error) =>
-          Effect.logDebug(`Ignored an answer for permission request ${error.requestId} of thread ${id}`)
-        ),
+        Effect.suspend(() => {
+          if (!adapter) {
+            return Effect.logDebug(`Ignored an answer for permission request ${requestId} of thread ${id}, whose agent has not started`);
+          }
+          // An answer for a request that is no longer open (the turn ended, or a second click) is
+          // nothing to act on, and never a reason to break the thread.
+          return Effect.catchTag(adapter.respond(requestId, optionId), 'UnknownPermissionRequest', (error) =>
+            Effect.logDebug(`Ignored an answer for permission request ${error.requestId} of thread ${id}`)
+          );
+        }),
       setMode: (next) =>
         modeLock.withPermits(1)(
-          adapter.setMode(next).pipe(
-            // Only a switch the agent accepted is shown: the webview must never show a stricter mode
-            // than the agent really runs in.
-            Effect.zipRight(
-              Effect.suspend(() => {
-                mode = next;
-                return post ? post({ type: 'mode', threadId: id, mode: next }) : Effect.void;
-              })
-            ),
-            Effect.catchTag('ModeChangeFailed', (error) =>
-              Effect.logWarning(`${AGENT_NAMES[error.agent]} refused to switch thread ${id} to ${MODE_NAMES[error.mode]}; it keeps ${MODE_NAMES[mode]}: ${error.reason}`)
-            )
-          )
+          Effect.suspend(() => {
+            // An agent not started yet starts in whatever mode the thread has by then.
+            if (!adapter) {
+              return showMode(next);
+            }
+            return adapter.setMode(next).pipe(
+              // Only a switch the agent accepted is shown: the webview must never show a stricter mode
+              // than the agent really runs in.
+              Effect.zipRight(showMode(next)),
+              Effect.catchTag('ModeChangeFailed', (error) =>
+                Effect.logWarning(`${AGENT_NAMES[error.agent]} refused to switch thread ${id} to ${MODE_NAMES[error.mode]}; it keeps ${MODE_NAMES[mode]}: ${error.reason}`)
+              )
+            );
+          })
         ),
       setModel: (next) => Effect.gen(function* () {
         if (running) {
           return;
         }
-        const changed = yield* Effect.either(adapter.setModel(next));
-        if (changed._tag === 'Left') {
-          yield* Effect.logWarning(`${AGENT_NAMES[adapter.agent]} refused the model change: ${changed.left.reason}`);
-          return;
+        if (adapter) {
+          const changed = yield* Effect.either(adapter.setModel(next));
+          if (changed._tag === 'Left') {
+            yield* Effect.logWarning(`${AGENT_NAMES[agent]} refused the model change: ${changed.left.reason}`);
+            return;
+          }
         }
         selectedModel = next;
         configuredModel = next ?? defaultReportedModel;
+        yield* journal.setModel(next);
         if (post) {
           yield* post({ type: 'model', threadId: id, model: next ?? null });
         }

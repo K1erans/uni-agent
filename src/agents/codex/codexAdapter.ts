@@ -144,7 +144,11 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
           }
           return rpc.request('thread/start', { cwd: this.options.cwd }, ThreadOpened);
         },
-        onSome: (threadId) => rpc.request('thread/resume', { threadId }, ThreadOpened),
+        onSome: (threadId) => {
+          // A resumed thread runs the model Codex stored for it until a turn names another.
+          this.modelChanged ||= this.selectedModel !== undefined;
+          return this.resuming(rpc.request('thread/resume', { threadId }, ThreadOpened));
+        },
       });
       if (!this.selectedModel) {
         this.defaultModel ??= model;

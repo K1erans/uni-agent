@@ -90,6 +90,8 @@ export interface ThreadState {
   running: boolean;
   /** The code of the latest error since the last turn started. */
   lastError: AgentErrorCode | undefined;
+  /** Why the thread takes no more prompts, if it does not. */
+  readOnly: string | null;
 }
 
 export const emptyThread: ThreadState = {
@@ -103,6 +105,7 @@ export const emptyThread: ThreadState = {
   items: [],
   running: false,
   lastError: undefined,
+  readOnly: null,
 };
 
 /**
@@ -114,7 +117,7 @@ export type ThreadAction = ExtensionMessage | { type: 'prompt_sent' } | { type: 
 export function threadReducer(state: ThreadState, action: ThreadAction): ThreadState {
   switch (action.type) {
     case 'history':
-      return action.events.reduce(applyEvent, { ...emptyThread, thread: action.thread, mode: action.mode, selectedModel: action.model });
+      return action.events.reduce(applyEvent, { ...emptyThread, thread: action.thread, mode: action.mode, selectedModel: action.model, readOnly: action.readOnly });
     case 'event':
       // Events only come from the shown thread; this guards against one crossing a thread switch.
       return action.threadId === state.thread?.id ? applyEvent(state, action) : state;
@@ -122,6 +125,8 @@ export function threadReducer(state: ThreadState, action: ThreadAction): ThreadS
       return action.threadId === state.thread?.id ? { ...state, mode: action.mode } : state;
     case 'model':
       return action.threadId === state.thread?.id ? { ...state, selectedModel: action.model } : state;
+    case 'read_only':
+      return action.threadId === state.thread?.id ? { ...state, readOnly: action.reason } : state;
     case 'models':
       return action.threadId === state.thread?.id && action.agent === state.thread.agent
         ? { ...state, models: action.models, modelError: action.error?.message ?? null }
@@ -349,7 +354,7 @@ export function awaitingApproval(state: ThreadState): boolean {
 }
 
 /** How the thread's agent is doing, for the status dot in the heading. */
-export type AgentStatus = 'ready' | 'working' | 'needs_approval' | 'not_found' | 'not_signed_in' | 'stopped';
+export type AgentStatus = 'ready' | 'working' | 'needs_approval' | 'not_found' | 'not_signed_in' | 'stopped' | 'read_only';
 
 export function agentStatus(state: ThreadState): AgentStatus {
   if (awaitingApproval(state)) {
@@ -358,12 +363,16 @@ export function agentStatus(state: ThreadState): AgentStatus {
   if (state.running) {
     return 'working';
   }
+  if (state.readOnly !== null) {
+    return 'read_only';
+  }
   switch (state.lastError) {
     case 'binary_missing':
       return 'not_found';
     case 'not_signed_in':
       return 'not_signed_in';
     case 'process_crashed':
+    case 'resume_failed':
       return 'stopped';
     // An error of the agent's own (an API error, a rate limit) leaves it able to take the next prompt.
     case 'agent_error':
