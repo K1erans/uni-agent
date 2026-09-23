@@ -20,6 +20,7 @@ import { Executables } from '../findExecutable';
 import { ModeSettings } from '../modes';
 import { WireMessage } from '../traffic';
 import { Turn } from '../turn';
+import { CLAUDE_COMMAND } from './claudeProtocol';
 import { ClaudeModeOverrides, claudeNoLooser, claudePermissionMode } from './claudeModes';
 import { describeTool, permissionOptions, ToolResultContent, toolResultContent } from './claudeTools';
 
@@ -131,7 +132,7 @@ class Connection {
  */
 export class ClaudeAdapter extends BaseAdapter<ClaudeTurn> {
   readonly agent = 'claude' as const;
-  protected readonly command = 'claude';
+  protected readonly command = CLAUDE_COMMAND;
 
   private connection: Connection | undefined;
   /** Whether Claude has written the session, so a restart must resume it rather than create it. */

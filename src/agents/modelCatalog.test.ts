@@ -31,16 +31,38 @@ function catalogWith(traffic: Parameters<typeof replayStdio>[0], claudeModels: C
 }
 
 describe('ModelCatalog', () => {
-  it('decodes Claude models and caches discovery per agent', async () => {
+  it('decodes Claude models, and asks each CLI once however many folders ask', async () => {
     const setup = catalogWith([], [{ value: 'sonnet', displayName: 'Sonnet', description: 'Fast' }]);
     const found = await Effect.runPromise(Effect.gen(function* () {
       const catalog = yield* ModelCatalog;
       const first = yield* catalog.list('claude', '/workspace', Option.none());
       const second = yield* catalog.list('claude', '/another', Option.none());
-      return [first, second];
+      // A different CLI, as after the executable path setting changed, is asked again.
+      const third = yield* catalog.list('claude', '/workspace', Option.some('/custom/claude'));
+      return [first, second, third];
     }).pipe(Effect.provide(setup.layer)));
-    expect(found).toEqual([[{ id: 'sonnet', name: 'Sonnet' }], [{ id: 'sonnet', name: 'Sonnet' }]]);
-    expect(setup.counts()).toEqual({ claudeCalls: 1, executableCalls: 1 });
+    expect(found).toEqual([[{ id: 'sonnet', name: 'Sonnet' }], [{ id: 'sonnet', name: 'Sonnet' }], [{ id: 'sonnet', name: 'Sonnet' }]]);
+    expect(setup.counts()).toEqual({ claudeCalls: 2, executableCalls: 3 });
+  });
+
+  it('lists the models a Cursor session can select: its model config option before its model list', async () => {
+    const setup = catalogWith([[
+      request(1, 'initialize', {
+        protocolVersion: 1,
+        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+        clientInfo: CLIENT_INFO,
+      }), result(1, {}),
+      request(2, 'session/new', { cwd: '/workspace', mcpServers: [] }),
+      result(2, {
+        sessionId: 's1',
+        models: { currentModelId: 'gpt-6', availableModels: [{ modelId: 'gpt-6', name: 'GPT-6' }] },
+        configOptions: [{ id: 'model', category: 'model', type: 'select', currentValue: 'default[]', options: [{ value: 'grok-4.7[effort=high]', name: 'Grok 4.7' }] }],
+      }),
+    ]]);
+    const models = await Effect.runPromise(Effect.gen(function* () {
+      return yield* (yield* ModelCatalog).list('cursor', '/workspace', Option.none());
+    }).pipe(Effect.provide(setup.layer)));
+    expect(models).toEqual([{ id: 'grok-4.7[effort=high]', name: 'Grok 4.7' }]);
   });
 
   it('paginates and decodes Codex model/list', async () => {
@@ -63,7 +85,7 @@ describe('ModelCatalog', () => {
         clientInfo: CLIENT_INFO,
       }), result(1, {}),
       request(2, 'session/new', { cwd: '/workspace', mcpServers: [] }),
-      result(2, { models: { availableModels: [{ modelId: 7, name: 'Bad' }] } }),
+      result(2, { sessionId: 's1', models: { currentModelId: 'x', availableModels: [{ modelId: 7, name: 'Bad' }] } }),
     ]]);
     const outcome = await Effect.runPromise(Effect.gen(function* () {
       return yield* Effect.either((yield* ModelCatalog).list('cursor', '/workspace', Option.none()));

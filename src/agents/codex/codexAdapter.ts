@@ -1,14 +1,15 @@
-import { Effect, Option, Predicate, Schema, type Deferred, type Scope } from 'effect';
+import { Effect, Option, Predicate, Schema, Stream, type Deferred, type Scope } from 'effect';
 import { Ids } from '../../ids';
 import { ModelChangeFailed, notSignedInMessage, type AdapterOptions, type ModeChangeFailed } from '../adapter';
 import type { AgentErrorCode, ContentBlock, StopReason, ToolCall } from '../events';
 import { Executables } from '../findExecutable';
 import { ModeSettings } from '../modes';
 import { decodeMessage, type JsonRpcConnection, type MalformedMessage } from '../jsonRpc';
-import { AgentFailure, CLIENT_INFO, JsonRpcAdapter, type OpenedSession, type TurnError } from '../jsonRpcAdapter';
+import { AgentFailure, JsonRpcAdapter, type OpenedSession, type TurnError } from '../jsonRpcAdapter';
 import { Stdio } from '../stdio';
 import { WireMessage } from '../traffic';
 import { Turn, type ChunkKind } from '../turn';
+import { CODEX_ARGS, CODEX_COMMAND, codexModels, initializeCodex } from './codexProtocol';
 import { CodexModeOverrides, codexNoLooser, codexPolicy, sandboxPolicy } from './codexModes';
 import { AvailableDecisions, CODEX_CANCELLED, codexApproval, ThreadItem, toolCallOf, type CodexApproval, type ItemLifecycle } from './codexItems';
 
@@ -25,11 +26,6 @@ const ThreadOpened = Schema.Struct({
 });
 
 const TurnStarted = Schema.Struct({ turn: Schema.Struct({ id: Schema.String }) });
-
-const DefaultModelPage = Schema.Struct({
-  data: Schema.Array(Schema.Struct({ model: Schema.NonEmptyString, isDefault: Schema.Boolean })),
-  nextCursor: Schema.NullOr(Schema.String),
-});
 
 const TurnFailure = Schema.Struct({
   message: Schema.String,
@@ -111,8 +107,8 @@ class CodexTurn extends Turn {
  */
 export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
   readonly agent = 'codex' as const;
-  protected readonly command = 'codex';
-  protected readonly args = ['app-server'];
+  protected readonly command = CODEX_COMMAND;
+  protected readonly args = CODEX_ARGS;
   private defaultModel: string | undefined;
   private modelChanged = false;
 
@@ -130,8 +126,7 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
 
   protected openSession(rpc: JsonRpcConnection, resume: Option.Option<string>): Effect.Effect<OpenedSession, TurnError> {
     return Effect.gen(this, function* () {
-      yield* rpc.request('initialize', { clientInfo: CLIENT_INFO, capabilities: null }, WireMessage);
-      yield* rpc.notify('initialized');
+      yield* initializeCodex(rpc);
       // Codex retries a signed-out turn for a while before failing it with no sign of why, so ask first.
       const { account, requiresOpenaiAuth } = yield* rpc.request('account/read', {}, AccountRead);
       if (account === null && requiresOpenaiAuth) {
@@ -189,21 +184,17 @@ export class CodexAdapter extends JsonRpcAdapter<CodexTurn> {
       if (model === undefined && this.defaultModel === undefined) {
         // A thread started with an explicit model reports that model at thread/start. Ask the
         // catalog for the real default rather than mistaking the initial selection for it.
-        yield* this.withSession((rpc) => Effect.gen(this, function* () {
-          let cursor: string | null = null;
-          do {
-            const page: typeof DefaultModelPage.Type = yield* rpc.request('model/list', cursor ? { cursor } : {}, DefaultModelPage).pipe(
-              Effect.mapError((error) => new ModelChangeFailed({ agent: this.agent, reason: error._tag === 'ConnectionClosed' ? error.reason : error.message }))
-            );
-            const found = page.data.find((item) => item.isDefault);
-            if (found) {
-              this.defaultModel = found.model;
-              return;
-            }
-            cursor = page.nextCursor;
-          } while (cursor);
-          return yield* new ModelChangeFailed({ agent: this.agent, reason: 'Codex did not report a default model.' });
-        }));
+        yield* this.withSession((rpc) =>
+          codexModels(rpc).pipe(
+            Stream.filter((model) => model.isDefault === true),
+            Stream.runHead,
+            Effect.mapError((error) => new ModelChangeFailed({ agent: this.agent, reason: error._tag === 'ConnectionClosed' ? error.reason : error.message })),
+            Effect.flatMap(Option.match({
+              onNone: () => new ModelChangeFailed({ agent: this.agent, reason: 'Codex did not report a default model.' }),
+              onSome: (found) => Effect.sync(() => { this.defaultModel = found.model; }),
+            }))
+          )
+        );
       }
       // Codex reads the model from each turn/start, so the next prompt applies this selection.
       this.modelChanged = true;
