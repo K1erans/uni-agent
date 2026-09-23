@@ -12,7 +12,7 @@ import { FakeAdapter } from './testing/fakeAdapter';
 import type { Post, Workspace } from './thread';
 import { makeThreads } from './threads';
 import { ThreadStore } from './threadStore';
-import { GitRunner } from './worktrees';
+import { GitRunner, Worktrees } from './worktrees';
 
 /** A webview double recording what it is sent. */
 function webview() {
@@ -53,15 +53,18 @@ function setup(
         }),
     }),
     Layer.succeed(FullAutoOptIn, { granted: Effect.succeed(optedIn), grant: Effect.void }),
-    GitRunner.live
+    Worktrees.live({
+      storagePath: worktree?.storage ?? path.join(os.tmpdir(), 'uni-agent-no-worktrees'),
+      isTrusted: () => true,
+      setupCommand: () => 'echo ready > setup.txt',
+    }).pipe(Layer.provide(GitRunner.live))
   );
   const scope = Effect.runSync(Scope.make());
   const threads = Effect.runSync(
     makeThreads(
       { fallback: () => ({ cwd: worktree?.repo ?? '/work/uni-agent', name: 'uni-agent' }), choose: Effect.succeed(chosen) },
       (agent) => FakeAdapter.maker(made, agent, resumable),
-      () => Effect.void,
-      worktree ? { storagePath: worktree.storage, setupCommand: () => 'echo ready > setup.txt' } : undefined
+      () => Effect.void
     ).pipe(Scope.extend(scope), Effect.provide(services), Effect.provide(store))
   );
   return {
@@ -91,9 +94,10 @@ describe('Threads', () => {
       const isolated = await run(threads.createInWorktree('cursor'));
       expect(isolated.workspace.cwd).toContain('thread-2');
       expect(await fs.readFile(path.join(isolated.workspace.cwd, 'setup.txt'), 'utf8')).toContain('ready');
-      const review = await run(threads.reviewCurrentWorktree());
+      const review = await run(threads.reviewWorktree(isolated.info.id));
       expect(review?.diffStat).toContain('setup.txt');
-      expect(await run(threads.removeCurrentWorktree(true))).toBe(true);
+      expect(await run(threads.reviewWorktree('thread-1'))).toBeUndefined();
+      expect(await run(threads.remove(isolated.info.id, true))).toBe(true);
       expect(threads.current?.info.id).toBe('thread-1');
       expect(execFileSync('git', ['branch', '--list', 'uni/thread-2'], { cwd: repo }).toString().trim()).toBe('');
     } finally {

@@ -1,4 +1,3 @@
-import * as fs from 'node:fs';
 import { Effect, ExecutionStrategy, Exit, Option, Scope } from 'effect';
 import { RESUME_FAILED, type MakeAdapter } from './agents/adapter';
 import { DEFAULT_MODE, type AgentKind, type Mode } from './agents/events';
@@ -8,7 +7,7 @@ import { Ids } from './ids';
 import { makeThread, type Post, type PromptAdmission, type Thread, type Workspace } from './thread';
 import type { PromptRejection } from './protocol';
 import { ThreadStore, type StoredThread } from './threadStore';
-import { GitFailed, GitRunner, inspectWorktree, prepareWorktree, removeWorktree, type Worktree, type WorktreeSetupFailed } from './worktrees';
+import { Worktrees, type GitFailed, type Worktree, type WorktreeReview, type WorktreeSetupFailed } from './worktrees';
 
 export type PromptOutcome = { readonly status: 'accepted' } | { readonly status: 'rejected'; readonly reason: PromptRejection };
 
@@ -44,10 +43,8 @@ export interface Threads {
   create(agent?: AgentKind, where?: Workspace): Effect.Effect<Thread>;
   /** Creates a thread in an isolated checkout of `where`; setup must finish before it is shown. */
   createInWorktree(agent?: AgentKind, where?: Workspace): Effect.Effect<Thread, GitFailed | WorktreeSetupFailed>;
-  /** Reports the shown worktree's changes, if the shown thread has one. */
-  reviewCurrentWorktree(): Effect.Effect<{ readonly worktree: Worktree; readonly status: string; readonly diffStat: string } | undefined, GitFailed>;
-  /** Stops and removes the shown worktree thread; optionally discards its branch. */
-  removeCurrentWorktree(discardBranch: boolean): Effect.Effect<boolean, GitFailed>;
+  /** Reports what the worktree of the thread with this ID has changed, if it has a worktree. */
+  reviewWorktree(threadId: string): Effect.Effect<WorktreeReview | undefined, GitFailed>;
   /** The worktree of the thread with this ID, archived or not, if it has one. */
   worktreeOf(threadId: string): Worktree | undefined;
   /** Shows the thread with this ID; unknown IDs are ignored. */
@@ -112,15 +109,14 @@ export function worktreeMissing(worktree: Worktree): string {
 export function makeThreads<R>(
   workspaces: Workspaces,
   makeAdapter: (agent: AgentKind, workspace: Workspace) => MakeAdapter<R>,
-  onChanged: () => Effect.Effect<void> = () => Effect.void,
-  worktreeConfig?: { readonly storagePath: string; readonly setupCommand: (workspace: Workspace) => string | undefined }
-): Effect.Effect<Threads, never, R | Ids | Branches | FullAutoOptIn | GitRunner | ThreadStore | Scope.Scope> {
+  onChanged: () => Effect.Effect<void> = () => Effect.void
+): Effect.Effect<Threads, never, R | Ids | Branches | FullAutoOptIn | Worktrees | ThreadStore | Scope.Scope> {
   return Effect.gen(function* () {
     const scope = yield* Effect.scope;
     const ids = yield* Ids;
     const branches = yield* Branches;
     const fullAuto = yield* FullAutoOptIn;
-    const git = yield* GitRunner;
+    const checkouts = yield* Worktrees;
     const store = yield* ThreadStore;
     const context = yield* Effect.context<R>();
     // Serialises everything that changes which thread is shown or connected, since VS Code
@@ -196,7 +192,7 @@ export function makeThreads<R>(
         if (entry.worktree) {
           worktrees.set(entry.id, entry.worktree);
         }
-        const checkoutGone = entry.worktree !== undefined && !(yield* exists(entry.worktree.path));
+        const checkoutGone = entry.worktree !== undefined && !(yield* checkouts.exists(entry.worktree));
         // Full auto only comes back while the workspace still allows it.
         const mode = entry.mode === 'full_auto' && !(yield* fullAuto.granted) ? DEFAULT_MODE : entry.mode;
         const thread = yield* makeThread(entry.id, entry.workspace, makeAdapter(entry.agent, entry.workspace), {
@@ -303,14 +299,10 @@ export function makeThreads<R>(
 
     const createInWorktree = (agent = current?.info.agent ?? DEFAULT_AGENT, where = workspaces.fallback()) =>
       Effect.gen(function* () {
-        if (!worktreeConfig) {
-          return yield* new GitFailed({ operation: 'worktree add', reason: 'Worktree storage is not configured.' });
-        }
         const id = yield* ids.next;
         const threadScope = yield* Scope.fork(scope, ExecutionStrategy.sequential);
         return yield* Effect.gen(function* () {
-          const checkout = yield* prepareWorktree(where.cwd, worktreeConfig.storagePath, id, worktreeConfig.setupCommand(where))
-            .pipe(Effect.provideService(GitRunner, git));
+          const checkout = yield* checkouts.create(where.cwd, id);
           return yield* openThread(id, agent, where, threadScope, checkout);
         }).pipe(Effect.onError(() => Scope.close(threadScope, Exit.void)));
       });
@@ -330,8 +322,7 @@ export function makeThreads<R>(
         // The checkout goes before the thread's record: if git fails, the thread stays archived,
         // which keeps the checkout reachable for another Delete, and the failure is reported.
         if (checkout) {
-          yield* removeWorktree(checkout, discardBranch).pipe(
-            Effect.provideService(GitRunner, git),
+          yield* checkouts.remove(checkout, discardBranch).pipe(
             Effect.tapError(() => (live ? keepArchived(threadId) : Effect.void))
           );
         }
@@ -383,15 +374,9 @@ export function makeThreads<R>(
         ),
       create: (agent, where) => serial(create(agent, where)),
       createInWorktree: (agent, where) => serial(createInWorktree(agent, where)),
-      reviewCurrentWorktree: () => Effect.suspend(() => {
-        const checkout = current && worktrees.get(current.info.id);
-        return checkout
-          ? Effect.map(inspectWorktree(checkout).pipe(Effect.provideService(GitRunner, git)), (review) => ({ worktree: checkout, ...review }))
-          : Effect.succeed(undefined);
-      }),
-      removeCurrentWorktree: (discardBranch) => Effect.suspend(() => {
-        const shown = current;
-        return shown && worktrees.has(shown.info.id) ? remove(shown.info.id, discardBranch) : Effect.succeed(false);
+      reviewWorktree: (threadId) => Effect.suspend(() => {
+        const checkout = checkoutOf(threadId);
+        return checkout ? checkouts.review(checkout) : Effect.succeed(undefined);
       }),
       worktreeOf: checkoutOf,
       select: (threadId) =>
@@ -461,9 +446,4 @@ export function makeThreads<R>(
       })),
     };
   });
-}
-
-/** Whether a file or folder exists; never fails. */
-function exists(location: string): Effect.Effect<boolean> {
-  return Effect.sync(() => fs.existsSync(location));
 }
