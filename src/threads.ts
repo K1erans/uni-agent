@@ -64,7 +64,8 @@ export interface Threads {
   /**
    * Deletes the thread with this ID, archived or not: stops its agent and removes it from the store.
    * A worktree thread's checkout is removed too, and its branch if `discardBranch`. The agent's own
-   * session files are left alone. Succeeds with whether there was such a thread.
+   * session files are left alone. Succeeds with whether there was such a thread. If git cannot
+   * remove the checkout, the thread is kept, archived, so Delete can be tried again.
    */
   remove(threadId: string, discardBranch?: boolean): Effect.Effect<boolean, GitFailed>;
   /** Sends an intentional background prompt to a thread, shown or not. */
@@ -250,6 +251,9 @@ export function makeThreads<R>(
     const refreshArchived = Effect.map(store.list, (all) => {
       archived = all.filter((entry) => entry.archived);
     });
+    /** Files a stored thread, already out of the window, under the archived ones. */
+    const keepArchived = (threadId: string) =>
+      Effect.all([store.setArchived(threadId, true), refreshArchived, onChanged()], { discard: true });
 
     for (const entry of yield* store.load) {
       if (entry.archived) {
@@ -318,18 +322,23 @@ export function makeThreads<R>(
         if (!live && !entry) {
           return false;
         }
+        const checkout = checkoutOf(threadId);
+        // Its agent is stopped first, so nothing is running in the checkout git removes.
         if (live) {
           yield* drop(live);
         }
-        const checkout = checkoutOf(threadId);
+        // The checkout goes before the thread's record: if git fails, the thread stays archived,
+        // which keeps the checkout reachable for another Delete, and the failure is reported.
+        if (checkout) {
+          yield* removeWorktree(checkout, discardBranch).pipe(
+            Effect.provideService(GitRunner, git),
+            Effect.tapError(() => (live ? keepArchived(threadId) : Effect.void))
+          );
+        }
         worktrees.delete(threadId);
         yield* store.remove(threadId);
         archived = archived.filter((candidate) => candidate.id !== threadId);
         yield* onChanged();
-        // The thread is gone whether or not git could remove its checkout; a failure is reported.
-        if (checkout) {
-          yield* removeWorktree(checkout, discardBranch).pipe(Effect.provideService(GitRunner, git));
-        }
         return true;
       }));
 
@@ -403,9 +412,7 @@ export function makeThreads<R>(
                 if (thread.isEmpty && !worktrees.has(threadId)) {
                   return;
                 }
-                yield* store.setArchived(threadId, true);
-                yield* refreshArchived;
-                yield* onChanged();
+                yield* keepArchived(threadId);
               }),
           })
         ),

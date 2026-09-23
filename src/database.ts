@@ -1,5 +1,5 @@
 import type * as sqlite from 'node:sqlite';
-import { Context, Data, Effect, Layer, Option, Schema } from 'effect';
+import { Cause, Context, Data, Effect, Exit, Layer, Option, Schema } from 'effect';
 
 /** A value SQLite hands back for one column. */
 export type SqlValue = sqlite.SQLOutputValue;
@@ -68,6 +68,13 @@ function makeService(db: sqlite.DatabaseSync): Context.Tag.Service<Database> {
   let depth = 0;
   const attempt = <A>(operation: string, f: () => A) =>
     Effect.try({ try: f, catch: (error) => new DatabaseError({ operation, reason: reasonOf(error) }) });
+  const rollback = attempt('ROLLBACK', () => db.exec('ROLLBACK'));
+  // A COMMIT that fails (a busy or full disk, say) can leave the transaction open, so it is rolled
+  // back before the failure is reported and the next BEGIN finds the connection idle. SQLite may
+  // have rolled it back itself already, which makes the ROLLBACK fail; only the COMMIT's error counts.
+  const commit = attempt('COMMIT', () => db.exec('COMMIT')).pipe(
+    Effect.tapError(() => Effect.catchAll(rollback, (error) => Effect.logDebug('No transaction left to roll back after a failed COMMIT', error)))
+  );
   return {
     run: (sql, ...parameters) => Effect.asVoid(attempt(sql, () => db.prepare(sql).run(...parameters))),
     all: (sql, ...parameters) => attempt(sql, () => db.prepare(sql).all(...parameters)),
@@ -78,19 +85,24 @@ function makeService(db: sqlite.DatabaseSync): Context.Tag.Service<Database> {
         if (depth > 0) {
           return effect;
         }
-        return Effect.acquireUseRelease(
-          attempt('BEGIN', () => {
-            db.exec('BEGIN');
-            depth++;
-          }),
-          () => effect,
-          (_, exit) =>
-            Effect.sync(() => {
-              depth--;
-            }).pipe(
-              Effect.zipRight(attempt(exit._tag === 'Success' ? 'COMMIT' : 'ROLLBACK', () => db.exec(exit._tag === 'Success' ? 'COMMIT' : 'ROLLBACK'))),
-              Effect.catchAll((error) => Effect.logError('Could not end a database transaction', error))
-            )
+        // A transaction that could not be ended fails, so its writes are never taken as saved.
+        return Effect.uninterruptibleMask((restore) =>
+          Effect.gen(function* () {
+            yield* attempt('BEGIN', () => {
+              db.exec('BEGIN');
+              depth++;
+            });
+            const exit = yield* Effect.exit(restore(effect));
+            depth--;
+            if (Exit.isSuccess(exit)) {
+              yield* commit;
+              return exit.value;
+            }
+            return yield* rollback.pipe(
+              Effect.catchAll((error) => Effect.failCause(Cause.sequential(exit.cause, Cause.fail(error)))),
+              Effect.zipRight(exit)
+            );
+          })
         );
       }),
   };

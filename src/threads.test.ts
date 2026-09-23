@@ -130,6 +130,42 @@ describe('Threads', () => {
     }
   });
 
+  it('keeps a worktree thread archived when git cannot remove its checkout, so Delete can be retried', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'uni-agent-threads-test-'));
+    const repo = path.join(root, 'repo');
+    await fs.mkdir(repo);
+    execFileSync('git', ['init', '-q', repo]);
+    await fs.writeFile(path.join(repo, 'file.txt'), 'before\n');
+    execFileSync('git', ['add', 'file.txt'], { cwd: repo });
+    execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'initial'], { cwd: repo });
+    const store = memoryStore();
+    const first = setup(false, { repo, storage: path.join(root, 'storage') }, store);
+    try {
+      await first.run(first.threads.connect(webview().post));
+      const isolated = await first.run(first.threads.createInWorktree('codex'));
+      // A locked checkout needs a second --force, so removing it fails.
+      execFileSync('git', ['worktree', 'lock', isolated.workspace.cwd], { cwd: repo });
+
+      await expect(first.run(first.threads.remove(isolated.info.id, true))).rejects.toThrow();
+      expect(first.threads.list().map((thread) => thread.info.id)).not.toContain(isolated.info.id);
+      expect(first.threads.archived().map((thread) => [thread.id, thread.worktree?.path])).toEqual([[isolated.info.id, isolated.workspace.cwd]]);
+      await fs.access(isolated.workspace.cwd);
+      await first.close();
+
+      // Still reachable after a reload, so once the lock is gone Delete finishes the job.
+      execFileSync('git', ['worktree', 'unlock', isolated.workspace.cwd], { cwd: repo });
+      const reloaded = setup(false, { repo, storage: path.join(root, 'storage') }, store);
+      expect(reloaded.threads.archived().map((thread) => thread.id)).toEqual([isolated.info.id]);
+      expect(await reloaded.run(reloaded.threads.remove(isolated.info.id, true))).toBe(true);
+      expect(reloaded.threads.archived()).toEqual([]);
+      await expect(fs.access(isolated.workspace.cwd)).rejects.toThrow();
+      expect(execFileSync('git', ['branch', '--list', `uni/${isolated.info.id}`], { cwd: repo }).toString().trim()).toBe('');
+      await reloaded.close();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('titles a kept thread with its first prompt', async () => {
     const store = memoryStore();
     const journal = Context.get(store, ThreadStore).journal({

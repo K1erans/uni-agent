@@ -191,4 +191,25 @@ describe('Thread', () => {
     expect(made).toEqual([]);
     await Effect.runPromise(Scope.close(scope, Exit.void));
   });
+
+  it('rejects a prompt to a thread never shown when loading finds its history unreadable', async () => {
+    const made: FakeAdapter[] = [];
+    const scope = Effect.runSync(Scope.make());
+    const thread = Effect.runSync(
+      makeThread('thread-1', { cwd: '/work/uni-agent', name: 'uni-agent' }, FakeAdapter.maker(made), {
+        restored: {
+          agent: 'codex',
+          sessionId: 'stored-session',
+          title: 'Fix the build',
+          readOnly: undefined,
+          history: Effect.succeed({ events: [], complete: false }),
+        },
+      }).pipe(Scope.extend(scope))
+    );
+
+    expect(await Effect.runPromise(thread.prompt('Again'))).toEqual({ status: 'rejected', reason: 'read_only' });
+    expect(thread.readOnly).toBe(HISTORY_UNREADABLE);
+    expect(made).toEqual([]);
+    await Effect.runPromise(Scope.close(scope, Exit.void));
+  });
 });

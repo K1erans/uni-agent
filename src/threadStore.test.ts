@@ -186,4 +186,25 @@ describe('Database', () => {
     );
     expect(count).toEqual(Either.right([{ n: 0 }]));
   });
+
+  it('reports a COMMIT that fails, and leaves the connection ready for the next transaction', () => {
+    // A deferred foreign key is only checked at COMMIT, which then fails and leaves the transaction open.
+    const migrations = ['CREATE TABLE parent (id INTEGER PRIMARY KEY); CREATE TABLE child (parent INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)'];
+    const outcome = withDatabase(':memory:', migrations, (db) =>
+      Effect.gen(function* () {
+        const failed = yield* Effect.either(db.transaction(db.run('INSERT INTO child VALUES (7)')));
+        yield* db.transaction(db.run('INSERT INTO parent VALUES (1)'));
+        const children = yield* db.all('SELECT count(*) AS n FROM child');
+        const parents = yield* db.all('SELECT count(*) AS n FROM parent');
+        return { failed, children, parents };
+      })
+    );
+    expect(outcome).toEqual(
+      Either.right({
+        failed: Either.left(expect.objectContaining({ _tag: 'DatabaseError', operation: 'COMMIT' })),
+        children: [{ n: 0 }],
+        parents: [{ n: 1 }],
+      })
+    );
+  });
 });

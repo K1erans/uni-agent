@@ -227,8 +227,10 @@ export function makeThread<R>(
     const agent = restored ? restored.agent : (yield* adapterFor).agent;
 
     const info: ThreadInfo = { id, agent, workspace: workspace.name };
+    // History is loaded before a prompt is admitted: loading can find it unreadable, which makes
+    // the thread read-only, and a prompt admitted before then would still reach the agent.
     const prompt = (text: string): Effect.Effect<PromptAdmission> =>
-      Effect.suspend(() => {
+      Effect.zipRight(loaded, Effect.suspend(() => {
         if (!text.trim()) {
           return Effect.succeed({ status: 'rejected' as const, reason: 'empty' as const });
         }
@@ -241,7 +243,6 @@ export function makeThread<R>(
         running = true;
         prompted = true;
         const turn = Effect.gen(function* () {
-          yield* loaded;
           const started = yield* adapterFor;
           const from = history.length;
           const stopReason = yield* Effect.orDie(started.prompt([{ type: 'text', text }]));
@@ -249,7 +250,7 @@ export function makeThread<R>(
           return { agent, model: configuredModel, sessionId, stopReason, response: replyText(events), events } satisfies TurnResult;
         }).pipe(Effect.ensuring(Effect.sync(() => { running = false; })));
         return Effect.map(Effect.forkIn(turn, scope), (fiber): PromptAdmission => ({ status: 'accepted', completion: Fiber.join(fiber) }));
-      });
+      }));
     const showMode = (next: Mode) =>
       Effect.suspend(() => {
         mode = next;
